@@ -65,29 +65,3 @@ h3,
 .rise-1 { animation-delay: 0.08s; }
 .rise-2 { animation-delay: 0.18s; }
 .rise-3 { animation-delay: 0.3s; }
-
-/* Street-map canvas: near-white base with a faint purple cast, lighter "streets" grid */
-.map-canvas {
-  background-color: #edeaf2;
-  background-image:
-    linear-gradient(#f9f8fb 2px, transparent 2px),
-    linear-gradient(90deg, #f9f8fb 2px, transparent 2px),
-    linear-gradient(#f4f2f8 1px, transparent 1px),
-    linear-gradient(90deg, #f4f2f8 1px, transparent 1px);
-  background-size:
-    240px 240px,
-    240px 240px,
-    60px 60px,
-    60px 60px;
-}
-
-/* Soft purple "district" patches scattered over the map */
-.map-parks {
-  background-image:
-    radial-gradient(ellipse 180px 120px at 12% 8%, rgba(120, 94, 167, 0.14), transparent 70%),
-    radial-gradient(ellipse 220px 140px at 88% 22%, rgba(120, 94, 167, 0.12), transparent 70%),
-    radial-gradient(ellipse 200px 130px at 8% 45%, rgba(120, 94, 167, 0.12), transparent 70%),
-    radial-gradient(ellipse 240px 150px at 92% 60%, rgba(120, 94, 167, 0.14), transparent 70%),
-    radial-gradient(ellipse 200px 120px at 15% 82%, rgba(120, 94, 167, 0.12), transparent 70%),
-    radial-gradient(ellipse 160px 200px at 50% 30%, rgba(105, 78, 147, 0.08), transparent 70%);
-}

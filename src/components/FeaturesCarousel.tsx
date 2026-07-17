@@ -9,7 +9,7 @@ const imageCards = [
     tagline: "Watch your package move on the map, minute by minute.",
     cta: "Track a delivery",
     href: "/track",
-    img: "/media/features/live-tracking.jpg",
+    img: "/media/features/live-tracking.png",
     light: false,
   },
   {
@@ -17,7 +17,7 @@ const imageCards = [
     tagline: "Every rider's deliveries and ratings, fully transparent.",
     cta: "Meet our riders",
     href: "/riders",
-    img: "/media/features/rider-performance.jpg",
+    img: "/media/features/rider-performance.png",
     light: false,
   },
   {
@@ -25,7 +25,7 @@ const imageCards = [
     tagline: "Rate every drop-off. Great service rises to the top.",
     cta: "How ratings work",
     href: "/ratings",
-    img: "/media/features/client-rating.jpg",
+    img: "/media/features/client-rating.png",
     light: true,
   },
 ];

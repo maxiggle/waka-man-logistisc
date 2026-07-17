@@ -1,32 +1,37 @@
 import type { Metadata, Viewport } from "next";
-import { Plus_Jakarta_Sans, Inter } from "next/font/google";
+import localFont from "next/font/local";
 import "./globals.css";
 
-const jakarta = Plus_Jakarta_Sans({
-  variable: "--font-display",
-  subsets: ["latin"],
-  weight: ["500", "600", "700", "800"],
-});
-
-const inter = Inter({
+const raleway = localFont({
+  src: [
+    {
+      path: "../fonts/Raleway-VariableFont_wght.ttf",
+      weight: "100 900",
+      style: "normal",
+    },
+    {
+      path: "../fonts/Raleway-Italic-VariableFont_wght.ttf",
+      weight: "100 900",
+      style: "italic",
+    },
+  ],
   variable: "--font-body",
-  subsets: ["latin"],
 });
 
 export const metadata: Metadata = {
-  title: "TempTransport — Deliveries you can watch happen",
+  title: "The Waka Man Logistics — on time. every time...",
   description:
     "Register riders, dispatch deliveries, and let clients track every package live on the map — then rate the drop-off. Built for reliable last-mile delivery.",
   manifest: "/manifest.webmanifest",
   appleWebApp: {
     capable: true,
     statusBarStyle: "default",
-    title: "TempTransport",
+    title: "The Waka Man Logistics",
   },
 };
 
 export const viewport: Viewport = {
-  themeColor: "#0c3b2e",
+  themeColor: "#4e397c",
 };
 
 export default function RootLayout({
@@ -35,7 +40,7 @@ export default function RootLayout({
   children: React.ReactNode;
 }>) {
   return (
-    <html lang="en" className={`${jakarta.variable} ${inter.variable} h-full antialiased`}>
+    <html lang="en" className={`${raleway.variable} h-full antialiased`}>
       <body className="min-h-full flex flex-col">{children}</body>
     </html>
   );

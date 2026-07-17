@@ -50,7 +50,7 @@ export default function FeaturesCarousel() {
         {/* Card 1 — dark card with app mockup, no image needed */}
         <article
           data-card
-          className="snap-start shrink-0 w-[85%] sm:w-[420px] rounded-3xl bg-forest text-white p-8 flex flex-col overflow-hidden"
+          className="snap-start shrink-0 w-[85%] sm:w-[420px] rounded-3xl bg-primary text-white p-8 flex flex-col overflow-hidden"
         >
           <h3 className="font-display text-2xl font-extrabold">Deliveries</h3>
           <p className="mt-3 text-white/75 leading-relaxed">
@@ -58,12 +58,12 @@ export default function FeaturesCarousel() {
           </p>
           <Link
             href="/register?as=client"
-            className="mt-6 self-start rounded-xl bg-brand text-white font-semibold px-6 py-3 hover:bg-brand-dark transition-colors"
+            className="mt-6 self-start rounded-xl bg-accent text-ink font-semibold px-6 py-3 hover:bg-accent-soft transition-colors"
           >
             Get started
           </Link>
           {/* Phone mockup */}
-          <div className="mt-8 mx-auto w-64 rounded-t-[2rem] border-4 border-b-0 border-brand/60 bg-white text-ink p-4 pb-0">
+          <div className="mt-8 mx-auto w-64 rounded-t-[2rem] border-4 border-b-0 border-accent/60 bg-white text-ink p-4 pb-0">
             <div className="flex justify-between text-[10px] font-semibold text-ink/70">
               <span>9:41</span>
               <span>●●●</span>
@@ -77,14 +77,14 @@ export default function FeaturesCarousel() {
               <div
                 key={name as string}
                 className={`mt-2 flex items-center justify-between rounded-xl border p-3 ${
-                  hot ? "border-brand" : "border-ink/10"
+                  hot ? "border-accent" : "border-ink/10"
                 }`}
               >
                 <div>
                   <p className="text-sm font-bold">{name}</p>
                   <p className="text-[10px] text-ink/60">{meta}</p>
                   {hot ? (
-                    <span className="mt-1 inline-block rounded bg-brand px-1.5 py-0.5 text-[8px] font-bold text-white">
+                    <span className="mt-1 inline-block rounded bg-accent px-1.5 py-0.5 text-[8px] font-bold text-ink">
                       FASTEST
                     </span>
                   ) : null}
@@ -100,7 +100,7 @@ export default function FeaturesCarousel() {
           <article
             data-card
             key={c.title}
-            className="snap-start relative shrink-0 w-[85%] sm:w-[420px] min-h-[560px] rounded-3xl overflow-hidden bg-mint-soft"
+            className="snap-start relative shrink-0 w-[85%] sm:w-[420px] min-h-[560px] rounded-3xl overflow-hidden bg-primary/10"
           >
             {/* eslint-disable-next-line @next/next/no-img-element */}
             <img
@@ -111,15 +111,15 @@ export default function FeaturesCarousel() {
             <div
               className={`absolute inset-0 ${
                 c.light
-                  ? "bg-gradient-to-b from-cream/80 via-transparent to-transparent"
-                  : "bg-gradient-to-b from-forest/70 via-forest/20 to-transparent"
+                  ? "bg-gradient-to-b from-surface/80 via-transparent to-transparent"
+                  : "bg-gradient-to-b from-primary/70 via-primary/20 to-transparent"
               }`}
               aria-hidden
             />
             <div className="relative p-8">
               <h3
                 className={`font-display text-2xl font-extrabold ${
-                  c.light ? "text-forest" : "text-white"
+                  c.light ? "text-primary" : "text-white"
                 }`}
               >
                 {c.title}
@@ -135,8 +135,8 @@ export default function FeaturesCarousel() {
                 href={c.href}
                 className={`mt-6 inline-block rounded-xl font-semibold px-6 py-3 transition-colors ${
                   c.light
-                    ? "bg-forest text-white hover:bg-forest-soft"
-                    : "bg-mint-soft text-forest hover:bg-white"
+                    ? "bg-primary text-white hover:bg-primary-soft"
+                    : "bg-surface text-primary hover:bg-white"
                 }`}
               >
                 {c.cta}
@@ -152,7 +152,7 @@ export default function FeaturesCarousel() {
           type="button"
           onClick={() => scrollBy(-1)}
           aria-label="Previous feature"
-          className="h-11 w-11 rounded-full border border-ink/15 bg-cream text-forest hover:border-forest transition-colors"
+          className="h-11 w-11 rounded-full border border-ink/15 bg-surface text-primary hover:border-primary transition-colors"
         >
           ←
         </button>
@@ -160,7 +160,7 @@ export default function FeaturesCarousel() {
           type="button"
           onClick={() => scrollBy(1)}
           aria-label="Next feature"
-          className="h-11 w-11 rounded-full border border-ink/15 bg-cream text-forest hover:border-forest transition-colors"
+          className="h-11 w-11 rounded-full border border-ink/15 bg-surface text-primary hover:border-primary transition-colors"
         >
           →
         </button>

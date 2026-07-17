@@ -29,26 +29,33 @@ export default function Home() {
   return (
     <main className="flex-1">
       {/* Nav */}
-      <header className="sticky top-0 z-50 bg-cream/80 backdrop-blur-md border-b border-ink/5">
+      <header className="sticky top-0 z-50 bg-surface/80 backdrop-blur-md border-b border-ink/5">
         <nav className="mx-auto max-w-6xl px-6 h-16 flex items-center justify-between">
-          <Link href="/" className="font-display text-xl font-extrabold tracking-tight text-forest">
-            Temp<span className="text-brand">Transport</span>
+          <Link href="/" className="flex items-center gap-2.5 font-display text-lg font-extrabold tracking-tight text-primary">
+            {/* eslint-disable-next-line @next/next/no-img-element */}
+            <img src="/brand/mark.png" alt="" className="h-9 w-auto" />
+            <span className="leading-none">
+              The Waka Man
+              <span className="block text-[10px] font-bold tracking-[0.3em] uppercase text-accent">
+                Logistics
+              </span>
+            </span>
           </Link>
           <div className="hidden md:flex items-center gap-8 text-sm font-medium text-ink/70">
-            <a href="#how" className="hover:text-forest transition-colors">How it works</a>
-            <a href="#features" className="hover:text-forest transition-colors">Features</a>
-            <a href="#riders" className="hover:text-forest transition-colors">For riders</a>
+            <a href="#how" className="hover:text-primary transition-colors">How it works</a>
+            <a href="#features" className="hover:text-primary transition-colors">Features</a>
+            <a href="#riders" className="hover:text-primary transition-colors">For riders</a>
           </div>
           <div className="flex items-center gap-3">
             <Link
               href="/login"
-              className="hidden sm:inline-block text-sm font-semibold text-forest hover:text-brand transition-colors"
+              className="hidden sm:inline-block text-sm font-semibold text-primary hover:text-primary-soft transition-colors"
             >
               Sign in
             </Link>
             <Link
               href="/register"
-              className="rounded-full bg-forest text-white text-sm font-semibold px-5 py-2.5 hover:bg-forest-soft transition-colors"
+              className="rounded-full bg-primary text-white text-sm font-semibold px-5 py-2.5 hover:bg-primary-soft transition-colors"
             >
               Get started
             </Link>
@@ -62,47 +69,51 @@ export default function Home() {
         <div className="absolute inset-0 map-parks" aria-hidden />
         <MapRoute />
 
-        {/* Hero — full-bleed video with the copy overlaid */}
+        {/* Hero — bold purple surface, orange CTA, brand mark watermark */}
         <section className="relative z-10">
-          <div data-route-stop className="relative min-h-[85vh] flex items-center overflow-hidden">
+          <div
+            data-route-stop
+            className="relative min-h-[85vh] flex items-center overflow-hidden bg-gradient-to-br from-primary via-primary to-primary-soft"
+          >
+            {/* Brand hero video */}
             <video
               className="absolute inset-0 h-full w-full object-cover"
-              src="/media/hero.mp4"
-              poster="/media/hero-poster.jpg"
+              src="/media/wakaman-hero.mp4"
               autoPlay
               muted
               loop
               playsInline
             />
-            {/* Readability scrim: soft cream wash on the left, fading out right */}
+            {/* Readability scrim: purple wash on the copy side, fading out right */}
             <div
-              className="absolute inset-0 bg-gradient-to-r from-cream/95 via-cream/70 to-transparent"
+              className="absolute inset-0 bg-gradient-to-r from-primary/90 via-primary/60 to-primary/20"
               aria-hidden
             />
             <div className="relative mx-auto max-w-6xl px-6 w-full py-24">
-              <div className="max-w-xl">
-                <p className="rise inline-flex items-center gap-2 rounded-full bg-mint-soft text-forest text-xs font-semibold tracking-wide uppercase px-4 py-2">
-                  <span className="h-2 w-2 rounded-full bg-brand animate-pulse" />
+              <div className="max-w-2xl">
+                <p className="rise inline-flex items-center gap-2 rounded-full bg-white/10 text-white/90 text-xs font-semibold tracking-wide uppercase px-4 py-2">
+                  <span className="h-2 w-2 rounded-full bg-accent animate-pulse" />
                   Live delivery tracking
                 </p>
-                <h1 className="rise rise-1 mt-6 text-5xl lg:text-7xl font-extrabold tracking-tight text-forest leading-[1.02]">
-                  Deliveries you can watch happen.
+                <h1 className="rise rise-1 mt-6 text-5xl lg:text-7xl font-extrabold tracking-tight text-white leading-[1.02]">
+                  Deliveries you can{" "}
+                  <span className="text-accent">watch happen</span>.
                 </h1>
-                <p className="rise rise-2 mt-6 text-lg text-ink/75 max-w-md leading-relaxed">
-                  TempTransport connects trusted riders with clients — every package
+                <p className="rise rise-2 mt-6 text-lg text-white/75 max-w-md leading-relaxed">
+                  The Waka Man Logistics connects trusted riders with clients — every package
                   tracked live on the map, every drop-off registered, every rider
                   rated on real performance.
                 </p>
                 <div className="rise rise-3 mt-8 flex flex-wrap items-center gap-4">
                   <Link
                     href="/register?as=client"
-                    className="rounded-full bg-brand text-white font-semibold px-7 py-3.5 shadow-lg shadow-brand/25 hover:bg-brand-dark transition-colors"
+                    className="rounded-full bg-accent text-ink font-semibold px-7 py-3.5 shadow-lg shadow-black/25 hover:bg-accent-soft transition-colors"
                   >
                     Send a package
                   </Link>
                   <Link
                     href="/register?as=rider"
-                    className="rounded-full border-2 border-forest/25 bg-cream/60 text-forest font-semibold px-7 py-3.5 hover:border-forest hover:bg-forest hover:text-white transition-colors"
+                    className="rounded-full border-2 border-white/30 text-white font-semibold px-7 py-3.5 hover:border-white hover:bg-white hover:text-primary transition-colors"
                   >
                     Become a rider
                   </Link>
@@ -114,8 +125,8 @@ export default function Home() {
                     ["Live", "GPS route tracking"],
                   ].map(([v, l]) => (
                     <div key={l}>
-                      <dt className="font-display text-2xl font-extrabold text-forest">{v}</dt>
-                      <dd className="mt-1 text-xs text-ink/70">{l}</dd>
+                      <dt className="font-display text-2xl font-extrabold text-white">{v}</dt>
+                      <dd className="mt-1 text-xs text-white/60">{l}</dd>
                     </div>
                   ))}
                 </dl>
@@ -127,8 +138,8 @@ export default function Home() {
         {/* Our Features — Bolt-style horizontal card carousel */}
         <section id="how" className="relative z-10 py-24">
           <div className="mx-auto max-w-6xl px-6">
-            <div data-route-stop className="rounded-[2.5rem] bg-cream/90 backdrop-blur-sm p-8 lg:p-10 shadow-xl shadow-forest/10">
-              <h2 className="text-3xl lg:text-4xl font-extrabold tracking-tight text-forest">
+            <div data-route-stop className="rounded-[2.5rem] bg-surface/90 backdrop-blur-sm p-8 lg:p-10 shadow-xl shadow-primary/10">
+              <h2 className="text-3xl lg:text-4xl font-extrabold tracking-tight text-primary">
                 Our Features
               </h2>
               <p className="mt-4 text-ink/60 max-w-xl">
@@ -146,9 +157,9 @@ export default function Home() {
           <div className="mx-auto max-w-6xl px-6 flex lg:justify-end">
             <div
               data-route-stop
-              className="lg:max-w-[62%] rounded-[2.5rem] bg-cream/90 backdrop-blur-sm p-10 shadow-xl shadow-forest/10"
+              className="lg:max-w-[62%] rounded-[2.5rem] bg-surface/90 backdrop-blur-sm p-10 shadow-xl shadow-primary/10"
             >
-              <h2 className="text-3xl lg:text-4xl font-extrabold tracking-tight text-forest">
+              <h2 className="text-3xl lg:text-4xl font-extrabold tracking-tight text-primary">
                 Built on trust, measured in deliveries
               </h2>
               <p className="mt-4 text-ink/65 leading-relaxed max-w-xl">
@@ -159,10 +170,10 @@ export default function Home() {
                 {features.map((f) => (
                   <div
                     key={f.title}
-                    className="rounded-3xl border border-ink/8 bg-white/70 p-6 hover:border-brand/40 transition-colors"
+                    className="rounded-3xl border border-ink/8 bg-white/70 p-6 hover:border-accent/40 transition-colors"
                   >
                     <span className="text-2xl" aria-hidden>{f.icon}</span>
-                    <h3 className="mt-3 font-bold text-forest">{f.title}</h3>
+                    <h3 className="mt-3 font-bold text-primary">{f.title}</h3>
                     <p className="mt-2 text-sm leading-relaxed text-ink/60">{f.body}</p>
                   </div>
                 ))}
@@ -176,10 +187,10 @@ export default function Home() {
           <div className="mx-auto max-w-6xl">
             <div
               data-route-stop
-              className="lg:max-w-[62%] rounded-[2.5rem] bg-forest text-white px-8 py-14 lg:px-14 relative overflow-hidden shadow-2xl shadow-forest/30"
+              className="lg:max-w-[62%] rounded-[2.5rem] bg-primary text-white px-8 py-14 lg:px-14 relative overflow-hidden shadow-2xl shadow-primary/30"
             >
               <div
-                className="absolute -right-24 -top-24 h-72 w-72 rounded-full bg-brand/20 blur-2xl"
+                className="absolute -right-24 -top-24 h-72 w-72 rounded-full bg-accent/20 blur-2xl"
                 aria-hidden
               />
               <div className="relative">
@@ -196,7 +207,7 @@ export default function Home() {
                 </p>
                 <Link
                   href="/register?as=rider"
-                  className="mt-8 inline-block rounded-full bg-brand text-white font-semibold px-8 py-4 hover:bg-brand-dark transition-colors shadow-lg shadow-black/20"
+                  className="mt-8 inline-block rounded-full bg-accent text-ink font-semibold px-8 py-4 hover:bg-accent-soft transition-colors shadow-lg shadow-black/20"
                 >
                   Apply as a rider
                 </Link>
@@ -207,12 +218,17 @@ export default function Home() {
       </div>
 
       {/* Footer */}
-      <footer className="border-t border-ink/8 py-10 bg-cream">
+      <footer className="border-t border-ink/8 py-10 bg-surface">
         <div className="mx-auto max-w-6xl px-6 flex flex-col sm:flex-row items-center justify-between gap-4 text-sm text-ink/50">
-          <span className="font-display font-bold text-forest">
-            Temp<span className="text-brand">Transport</span>
+          <span className="flex items-center gap-2 font-display font-bold text-primary">
+            {/* eslint-disable-next-line @next/next/no-img-element */}
+            <img src="/brand/mark.png" alt="" className="h-7 w-auto" />
+            The Waka Man Logistics
+            <span className="hidden sm:inline text-xs font-semibold tracking-widest text-accent">
+              on time. every time...
+            </span>
           </span>
-          <p>© {new Date().getFullYear()} TempTransport. All rights reserved.</p>
+          <p>© {new Date().getFullYear()} The Waka Man Logistics. All rights reserved.</p>
         </div>
       </footer>
     </main>

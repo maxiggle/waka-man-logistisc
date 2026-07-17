@@ -1,35 +1,37 @@
 @import "tailwindcss";
 
+/* Brand palette
+   Primary purple #4e397c (+ tints #694E93, #785EA7) — brand, dark surfaces
+   Accent orange  #f16834 (+ tints #f99774, #F8AA8E) — CTAs and highlights only
+   Surface #FBFBFB / Ink #1A1A1A — the bulk of the page */
 :root {
-  --cream: #f4f1ea;
-  --cream-deep: #eae6db;
-  --ink: #14181a;
-  --forest: #0c3b2e;
-  --forest-soft: #14523f;
-  --brand: #06c167;
-  --brand-dark: #059452;
-  --mint: #bcd9c0;
-  --mint-soft: #d9e8dc;
-  --mustard: #e8a33d;
+  --surface: #fbfbfb;
+  --surface-deep: #f3f1f7;
+  --ink: #1a1a1a;
+  --primary: #4e397c;
+  --primary-soft: #694e93;
+  --primary-light: #785ea7;
+  --accent: #f16834;
+  --accent-soft: #f99774;
+  --accent-tint: #f8aa8e;
 }
 
 @theme inline {
-  --color-cream: var(--cream);
-  --color-cream-deep: var(--cream-deep);
+  --color-surface: var(--surface);
+  --color-surface-deep: var(--surface-deep);
   --color-ink: var(--ink);
-  --color-forest: var(--forest);
-  --color-forest-soft: var(--forest-soft);
-  --color-brand: var(--brand);
-  --color-brand-dark: var(--brand-dark);
-  --color-mint: var(--mint);
-  --color-mint-soft: var(--mint-soft);
-  --color-mustard: var(--mustard);
-  --font-display: var(--font-display);
+  --color-primary: var(--primary);
+  --color-primary-soft: var(--primary-soft);
+  --color-primary-light: var(--primary-light);
+  --color-accent: var(--accent);
+  --color-accent-soft: var(--accent-soft);
+  --color-accent-tint: var(--accent-tint);
+  --font-display: var(--font-body);
   --font-body: var(--font-body);
 }
 
 body {
-  background: var(--cream);
+  background: var(--surface);
   color: var(--ink);
   font-family: var(--font-body), system-ui, sans-serif;
 }
@@ -42,7 +44,7 @@ h3,
 }
 
 ::selection {
-  background: var(--brand);
+  background: var(--primary);
   color: #fff;
 }
 
@@ -64,14 +66,14 @@ h3,
 .rise-2 { animation-delay: 0.18s; }
 .rise-3 { animation-delay: 0.3s; }
 
-/* Street-map canvas: cream base, white "streets" grid, soft blocks */
+/* Street-map canvas: near-white base with a faint purple cast, lighter "streets" grid */
 .map-canvas {
-  background-color: #e9e6df;
+  background-color: #edeaf2;
   background-image:
-    linear-gradient(#f7f5ef 2px, transparent 2px),
-    linear-gradient(90deg, #f7f5ef 2px, transparent 2px),
-    linear-gradient(#f3f0e9 1px, transparent 1px),
-    linear-gradient(90deg, #f3f0e9 1px, transparent 1px);
+    linear-gradient(#f9f8fb 2px, transparent 2px),
+    linear-gradient(90deg, #f9f8fb 2px, transparent 2px),
+    linear-gradient(#f4f2f8 1px, transparent 1px),
+    linear-gradient(90deg, #f4f2f8 1px, transparent 1px);
   background-size:
     240px 240px,
     240px 240px,
@@ -79,13 +81,13 @@ h3,
     60px 60px;
 }
 
-/* Soft green "park" patches scattered over the map */
+/* Soft purple "district" patches scattered over the map */
 .map-parks {
   background-image:
-    radial-gradient(ellipse 180px 120px at 12% 8%, rgba(168, 213, 162, 0.4), transparent 70%),
-    radial-gradient(ellipse 220px 140px at 88% 22%, rgba(168, 213, 162, 0.35), transparent 70%),
-    radial-gradient(ellipse 200px 130px at 8% 45%, rgba(168, 213, 162, 0.35), transparent 70%),
-    radial-gradient(ellipse 240px 150px at 92% 60%, rgba(168, 213, 162, 0.4), transparent 70%),
-    radial-gradient(ellipse 200px 120px at 15% 82%, rgba(168, 213, 162, 0.35), transparent 70%),
-    radial-gradient(ellipse 160px 200px at 50% 30%, rgba(188, 217, 192, 0.25), transparent 70%);
+    radial-gradient(ellipse 180px 120px at 12% 8%, rgba(120, 94, 167, 0.14), transparent 70%),
+    radial-gradient(ellipse 220px 140px at 88% 22%, rgba(120, 94, 167, 0.12), transparent 70%),
+    radial-gradient(ellipse 200px 130px at 8% 45%, rgba(120, 94, 167, 0.12), transparent 70%),
+    radial-gradient(ellipse 240px 150px at 92% 60%, rgba(120, 94, 167, 0.14), transparent 70%),
+    radial-gradient(ellipse 200px 120px at 15% 82%, rgba(120, 94, 167, 0.12), transparent 70%),
+    radial-gradient(ellipse 160px 200px at 50% 30%, rgba(105, 78, 147, 0.08), transparent 70%);
 }

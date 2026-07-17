@@ -80,7 +80,7 @@ export default function MapRoute() {
       track = el("path", {
         d,
         fill: "none",
-        stroke: "#0c3b2e",
+        stroke: "#4e397c",
         "stroke-opacity": "0.15",
         "stroke-width": "3",
         "stroke-dasharray": "6 14",
@@ -90,7 +90,7 @@ export default function MapRoute() {
       line = el("path", {
         d,
         fill: "none",
-        stroke: "#06c167",
+        stroke: "#f16834",
         "stroke-width": "5",
         "stroke-linecap": "round",
         "stroke-linejoin": "round",
@@ -101,11 +101,11 @@ export default function MapRoute() {
         const g = el("g", { transform: `translate(${s.x}, ${s.y})` });
         const outer = el("circle", {
           r: "10",
-          fill: "#e8e6dd",
-          stroke: "#b9b5a8",
+          fill: "#ECE9F2",
+          stroke: "#B3A6CC",
           "stroke-width": "2.5",
         });
-        const inner = el("circle", { r: "4", fill: "#b9b5a8" });
+        const inner = el("circle", { r: "4", fill: "#B3A6CC" });
         outer.style.transition = "fill 0.4s, stroke 0.4s";
         inner.style.transition = "fill 0.4s";
         g.append(outer, inner);
@@ -114,8 +114,8 @@ export default function MapRoute() {
       });
 
       arrow = el("g", {}) as SVGGElement;
-      const halo = el("circle", { r: "13", fill: "#06c167", opacity: "0.25" });
-      const head = el("path", { d: "M 0 -9 L 7 6 L 0 2.5 L -7 6 Z", fill: "#0c3b2e" });
+      const halo = el("circle", { r: "13", fill: "#f16834", opacity: "0.25" });
+      const head = el("path", { d: "M 0 -9 L 7 6 L 0 2.5 L -7 6 Z", fill: "#4e397c" });
       arrow.append(halo, head);
       arrow.style.opacity = "0";
       svg.append(arrow);
@@ -145,9 +145,9 @@ export default function MapRoute() {
 
       for (const p of pins) {
         const active = tipY >= p.y;
-        p.outer.setAttribute("fill", active ? "#06c167" : "#e8e6dd");
-        p.outer.setAttribute("stroke", active ? "#0c3b2e" : "#b9b5a8");
-        p.inner.setAttribute("fill", active ? "#ffffff" : "#b9b5a8");
+        p.outer.setAttribute("fill", active ? "#f16834" : "#ECE9F2");
+        p.outer.setAttribute("stroke", active ? "#4e397c" : "#B3A6CC");
+        p.inner.setAttribute("fill", active ? "#ffffff" : "#B3A6CC");
       }
     };
 

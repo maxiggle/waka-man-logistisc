@@ -1,8 +1,29 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
+import dynamic from "next/dynamic";
 import Link from "next/link";
 import type { Delivery } from "@/lib/demo";
+import { subscribeToPosition } from "@/lib/tracking";
+import { hasMapbox } from "@/lib/mapbox";
+import type { RiderPosition } from "@/lib/native/rider-location";
+
+// mapbox-gl touches window at import — load it client-side only.
+const LiveMap = dynamic(() => import("@/components/LiveMap"), { ssr: false });
+
+// Lagos bounding box used to project live GPS fixes into the map viewBox.
+const GEO = { latMin: 6.38, latMax: 6.72, lngMin: 3.1, lngMax: 3.65 };
+const VIEW = { w: 400, h: 520, pad: 40 };
+
+function projectToViewBox(pos: RiderPosition): { x: number; y: number } {
+  const nx = (pos.lng - GEO.lngMin) / (GEO.lngMax - GEO.lngMin);
+  const ny = (GEO.latMax - pos.lat) / (GEO.latMax - GEO.latMin); // lat grows north, y grows down
+  const clamp = (v: number) => Math.min(1, Math.max(0, v));
+  return {
+    x: VIEW.pad + clamp(nx) * (VIEW.w - VIEW.pad * 2),
+    y: VIEW.pad + clamp(ny) * (VIEW.h - VIEW.pad * 2),
+  };
+}
 
 // Right-angled "street" route through the map viewBox (0 0 400 520).
 const ROUTE_D = "M 64 56 L 64 168 L 208 168 L 208 300 L 336 300 L 336 452";
@@ -27,9 +48,18 @@ export default function LiveTracking({ delivery }: { delivery: Delivery }) {
   const markerRef = useRef<SVGGElement>(null);
   const [progress, setProgress] = useState(delivery.startProgress);
   const [rated, setRated] = useState(0);
+  const [livePos, setLivePos] = useState<RiderPosition | null>(null);
+  const live = livePos !== null;
+
+  // Real rider positions, when a rider is broadcasting for this delivery.
+  // First live fix permanently switches the map off the simulation.
+  useEffect(() => {
+    return subscribeToPosition(delivery.id, setLivePos);
+  }, [delivery.id]);
 
   // Simulated live movement: advance from startProgress to 1 over `duration`.
   useEffect(() => {
+    if (live) return; // real GPS has taken over
     if (delivery.startProgress >= 1 || delivery.status === "assigned") {
       // Delivered already, or rider not yet at pickup — no route animation.
       setProgress(delivery.startProgress);
@@ -46,7 +76,7 @@ export default function LiveTracking({ delivery }: { delivery: Delivery }) {
       if (p >= 1) clearInterval(timer);
     }, 80);
     return () => clearInterval(timer);
-  }, [delivery]);
+  }, [delivery, live]);
 
   // Imperative SVG updates (cheap: small path, small area).
   useEffect(() => {
@@ -54,22 +84,36 @@ export default function LiveTracking({ delivery }: { delivery: Delivery }) {
     const done = doneRef.current;
     const marker = markerRef.current;
     if (!path || !done || !marker) return;
+    if (livePos) {
+      const pt = projectToViewBox(livePos);
+      done.style.strokeDasharray = `0 ${path.getTotalLength()}`;
+      marker.setAttribute("transform", `translate(${pt.x}, ${pt.y})`);
+      return;
+    }
     const total = path.getTotalLength();
     const at = total * progress;
     done.style.strokeDasharray = `${at} ${total}`;
     const pt = path.getPointAtLength(at);
     marker.setAttribute("transform", `translate(${pt.x}, ${pt.y})`);
-  }, [progress]);
+  }, [progress, livePos]);
 
   const startedAtPickup = delivery.status !== "assigned";
-  const stage = stageFromProgress(progress, startedAtPickup);
+  // Live GPS carries no route progress — hold the stepper at "In transit"
+  // instead of inheriting whatever the abandoned simulation reached.
+  const stage = live ? 2 : stageFromProgress(progress, startedAtPickup);
   const delivered = stage === 3;
+  // Real Mapbox map only when a rider is live and a token is configured;
+  // otherwise the SVG route (demo simulation) still runs.
+  const showMap = live && livePos !== null && hasMapbox();
   const minsLeft = Math.max(1, Math.ceil((1 - progress) * delivery.duration / 8));
 
   return (
     <div className="grid lg:grid-cols-[1.15fr_1fr] gap-6">
       {/* Map */}
       <div className="relative rounded-3xl overflow-hidden bg-[#1a1626] min-h-[420px] lg:min-h-[560px]">
+        {showMap ? (
+          <LiveMap position={livePos} />
+        ) : (
         <svg viewBox="0 0 400 520" className="absolute inset-0 h-full w-full" aria-hidden>
           {/* street grid */}
           <defs>
@@ -99,11 +143,21 @@ export default function LiveTracking({ delivery }: { delivery: Delivery }) {
             <circle r="9" fill="#f16834" stroke="#fff" strokeWidth="2.5" />
           </g>
         </svg>
-        <div className="absolute top-4 left-4 rounded-full bg-black/40 backdrop-blur px-4 py-1.5 text-xs font-semibold text-white/90">
-          {delivered ? "Route completed" : "Live · Lagos"}
-          {!delivered && <span className="ml-2 inline-block h-2 w-2 rounded-full bg-accent animate-pulse" />}
+        )}
+        <div className="absolute top-4 left-4 z-10 rounded-full bg-black/40 backdrop-blur px-4 py-1.5 text-xs font-semibold text-white/90">
+          {live ? "Live GPS" : delivered ? "Route completed" : "Live · Lagos"}
+          {(live || !delivered) && (
+            <span className="ml-2 inline-block h-2 w-2 rounded-full bg-accent animate-pulse" />
+          )}
         </div>
-        <p className="absolute bottom-3 right-4 text-[10px] text-white/30">Demo — simulated route</p>
+        {live ? (
+          <p className="absolute bottom-3 right-4 z-10 text-[10px] text-white/40 tabular-nums">
+            {livePos.lat.toFixed(5)}, {livePos.lng.toFixed(5)} · updated{" "}
+            {new Date(livePos.timestamp).toLocaleTimeString()}
+          </p>
+        ) : (
+          <p className="absolute bottom-3 right-4 text-[10px] text-white/30">Demo — simulated route</p>
+        )}
       </div>
 
       {/* Details */}
@@ -115,7 +169,9 @@ export default function LiveTracking({ delivery }: { delivery: Delivery }) {
             </div>
             <div className="flex-1">
               <p className="font-bold">
-                {delivered
+                {live
+                  ? `${delivery.rider.name} is on the way — live GPS`
+                  : delivered
                   ? `Delivered by ${delivery.rider.name}`
                   : stage === 1 && !startedAtPickup
                     ? `${delivery.rider.name} is heading to pickup`

@@ -50,6 +50,17 @@ export const ratingSchema = z.object({
   createdAt: z.number(),
 });
 
+// Positions crossing the native bridge are untrusted input — validate shape and ranges.
+export const riderPositionSchema = z.object({
+  lat: z.number().min(-90).max(90),
+  lng: z.number().min(-180).max(180),
+  accuracy: z.number().nonnegative(),
+  heading: z.number().min(0).max(360).nullable(),
+  speed: z.number().nonnegative().nullable(),
+  timestamp: z.number().int().positive(),
+  isMock: z.boolean(),
+});
+
 export type Rider = z.infer<typeof riderSchema>;
 export type Client = z.infer<typeof clientSchema>;
 export type Delivery = z.infer<typeof deliverySchema>;

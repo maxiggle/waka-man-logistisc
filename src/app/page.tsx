@@ -1,5 +1,19 @@
+"use client";
+
+import { useEffect, useState } from "react";
 import Link from "next/link";
+import { useRouter } from "next/navigation";
+import { Capacitor } from "@capacitor/core";
 import FeaturesCarousel from "@/components/FeaturesCarousel";
+import { useAuth } from "@/context/AuthContext";
+import { isReturningDevice } from "@/lib/session";
+import type { UserRole } from "@/context/AuthContext";
+
+function homeRouteForRole(role: UserRole | undefined): string {
+  if (role === "admin") return "/admin";
+  if (role === "rider") return "/rider/active";
+  return "/dashboard";
+}
 
 const features = [
   {
@@ -47,7 +61,25 @@ const features = [
   },
 ];
 
-export default function Home() {
+function LandingPage() {
+  const router = useRouter();
+  const { user, userProfile, signOut } = useAuth();
+
+  const [pickup, setPickup] = useState("");
+  const [dropoff, setDropoff] = useState("");
+
+  const handleQuickBook = (e: React.FormEvent) => {
+    e.preventDefault();
+    const p = encodeURIComponent(pickup || "Victoria Island, Lagos");
+    const d = encodeURIComponent(dropoff || "Ikeja, Lagos");
+
+    if (user) {
+      router.push(`/send?pickup=${p}&dropoff=${d}`);
+    } else {
+      router.push(`/login?redirect=/send?pickup=${p}&dropoff=${d}`);
+    }
+  };
+
   return (
     <main className="flex-1">
       {/* Nav */}
@@ -69,18 +101,34 @@ export default function Home() {
             <a href="#riders" className="hover:text-primary transition-colors">For riders</a>
           </div>
           <div className="flex items-center gap-3">
-            <Link
-              href="/login"
-              className="hidden sm:inline-block text-sm font-semibold text-primary hover:text-primary-soft transition-colors"
-            >
-              Sign in
-            </Link>
-            <Link
-              href="/register"
-              className="rounded-full bg-primary text-white text-sm font-semibold px-5 py-2.5 hover:bg-primary-soft transition-colors"
-            >
-              Get started
-            </Link>
+            {user ? (
+              <div className="flex items-center gap-3">
+                <span className="text-xs font-semibold text-primary hidden sm:inline-block">
+                  Hi, {userProfile?.name || user.displayName || "User"}
+                </span>
+                <button
+                  onClick={() => signOut()}
+                  className="rounded-full border border-primary/20 text-primary text-xs font-semibold px-4 py-2 hover:bg-primary/5 transition-colors cursor-pointer"
+                >
+                  Sign out
+                </button>
+              </div>
+            ) : (
+              <>
+                <Link
+                  href="/login"
+                  className="hidden sm:inline-block text-sm font-semibold text-primary hover:text-primary-soft transition-colors"
+                >
+                  Sign in
+                </Link>
+                <Link
+                  href="/login"
+                  className="rounded-full bg-primary text-white text-sm font-semibold px-5 py-2.5 hover:bg-primary-soft transition-colors"
+                >
+                  Sign in with Google
+                </Link>
+              </>
+            )}
           </div>
         </nav>
       </header>
@@ -100,56 +148,91 @@ export default function Home() {
             />
             {/* Readability scrim: purple wash on the copy side, fading out right */}
             <div
-              className="absolute inset-0 bg-gradient-to-r from-primary/90 via-primary/60 to-primary/20"
+              className="absolute inset-0 bg-gradient-to-r from-primary/95 via-primary/80 to-primary/30"
               aria-hidden
             />
-            <div className="relative mx-auto max-w-6xl px-6 w-full py-24">
-              <div className="max-w-2xl">
-                <p className="rise inline-flex items-center gap-2 rounded-full bg-white/10 text-white/90 text-xs font-semibold tracking-wide uppercase px-4 py-2">
-                  <span className="h-2 w-2 rounded-full bg-accent animate-pulse" />
-                  Live delivery tracking
-                </p>
-                <h1 className="rise rise-1 mt-6 text-5xl lg:text-7xl font-extrabold tracking-tight text-white leading-[1.02]">
-                  Deliveries you can{" "}
-                  <span className="text-accent">watch happen</span>.
-                </h1>
-                <p className="rise rise-2 mt-6 text-lg text-white/75 max-w-md leading-relaxed">
-                  The Waka Man Logistics connects trusted riders with clients — every package
-                  tracked live on the map, every drop-off registered, every rider
-                  rated on real performance.
-                </p>
-                <div className="rise rise-3 mt-8 flex flex-wrap items-center gap-4">
-                  <Link
-                    href="/register?as=client"
-                    className="rounded-full bg-accent text-ink font-semibold px-7 py-3.5 shadow-lg shadow-black/25 hover:bg-accent-soft transition-colors"
-                  >
-                    Send a package
-                  </Link>
-                  <Link
-                    href="/register?as=rider"
-                    className="rounded-full border-2 border-white/30 text-white font-semibold px-7 py-3.5 hover:border-white hover:bg-white hover:text-primary transition-colors"
-                  >
-                    Become a rider
-                  </Link>
+            <div className="relative mx-auto max-w-6xl px-6 w-full py-16 lg:py-24">
+              <div className="grid lg:grid-cols-12 gap-12 items-center">
+                <div className="lg:col-span-7">
+                  <h1 className="rise rise-1 mt-6 text-4xl lg:text-6xl font-extrabold tracking-tight text-white leading-[1.05]">
+                    Deliveries you can{" "}
+                    <span className="text-accent">watch happen</span>.
+                  </h1>
+                  <p className="rise rise-2 mt-6 text-base lg:text-lg text-white/80 max-w-lg leading-relaxed">
+                    The Waka Man Logistics connects trusted riders with clients — every package
+                    tracked live on the map, every drop-off registered, every rider
+                    rated on real performance.
+                  </p>
+
+                  <dl className="rise rise-3 mt-10 grid grid-cols-2 gap-6 max-w-md">
+                    {[
+                      ["98%", "on-time drop-offs"],
+                      ["4.9★", "average rider rating"],
+                    ].map(([v, l]) => (
+                      <div key={l}>
+                        <dt className="font-display text-2xl font-extrabold text-white">{v}</dt>
+                        <dd className="mt-1 text-xs text-white/60">{l}</dd>
+                      </div>
+                    ))}
+                  </dl>
                 </div>
-                <dl className="rise rise-3 mt-12 grid grid-cols-3 gap-6 max-w-md">
-                  {[
-                    ["98%", "on-time drop-offs"],
-                    ["4.9★", "average rider rating"],
-                    ["Live", "GPS route tracking"],
-                  ].map(([v, l]) => (
-                    <div key={l}>
-                      <dt className="font-display text-2xl font-extrabold text-white">{v}</dt>
-                      <dd className="mt-1 text-xs text-white/60">{l}</dd>
-                    </div>
-                  ))}
-                </dl>
+
+                {/* Hero Quick-Book Form */}
+                <div className="lg:col-span-5">
+                  <div className="rounded-3xl bg-white/95 backdrop-blur-md p-6 lg:p-8 shadow-2xl border border-white/20">
+                    <h2 className="font-extrabold text-2xl text-primary">Book a Rider</h2>
+                    <p className="mt-1 text-xs text-ink/60">
+                      Enter addresses to calculate fare &amp; request dispatch instantly.
+                    </p>
+
+                    <form onSubmit={handleQuickBook} className="mt-6 space-y-4">
+                      <div>
+                        <label htmlFor="quick-pickup" className="block text-xs font-bold uppercase tracking-wider text-ink/70">
+                          Pickup Location
+                        </label>
+                        <input
+                          id="quick-pickup"
+                          type="text"
+                          placeholder="e.g. 14 Adeola Odeku St, VI"
+                          value={pickup}
+                          onChange={(e) => setPickup(e.target.value)}
+                          className="mt-1.5 w-full rounded-xl border border-ink/15 bg-white px-4 py-3 text-sm text-ink focus:outline-none focus:border-primary focus:ring-2 focus:ring-primary/20"
+                        />
+                      </div>
+
+                      <div>
+                        <label htmlFor="quick-dropoff" className="block text-xs font-bold uppercase tracking-wider text-ink/70">
+                          Drop-off Location
+                        </label>
+                        <input
+                          id="quick-dropoff"
+                          type="text"
+                          placeholder="e.g. 3 Allen Avenue, Ikeja"
+                          value={dropoff}
+                          onChange={(e) => setDropoff(e.target.value)}
+                          className="mt-1.5 w-full rounded-xl border border-ink/15 bg-white px-4 py-3 text-sm text-ink focus:outline-none focus:border-primary focus:ring-2 focus:ring-primary/20"
+                        />
+                      </div>
+
+                      <button
+                        type="submit"
+                        className="w-full rounded-xl bg-accent text-ink font-bold py-3.5 hover:bg-accent-soft transition-colors cursor-pointer shadow-md text-base"
+                      >
+                        Book a Rider Now →
+                      </button>
+                    </form>
+
+                    <p className="mt-4 text-center text-xs text-ink/50">
+                      Secured with Google Authentication · Instant Dispatch
+                    </p>
+                  </div>
+                </div>
               </div>
             </div>
           </div>
         </section>
 
-        {/* Our Features — full-width surface, editorial header + carousel */}
+        {/* Our Features */}
         <section id="how" className="relative z-10 bg-surface">
           <div className="mx-auto max-w-6xl px-6 py-24 lg:py-28">
             <div className="flex flex-wrap items-end justify-between gap-6">
@@ -172,7 +255,7 @@ export default function Home() {
           </div>
         </section>
 
-        {/* Features — editorial split: sticky heading left, numbered rows right */}
+        {/* Features list */}
         <section id="features" className="relative z-10 bg-surface-deep">
           <div className="mx-auto max-w-6xl px-6 py-24 lg:py-28 grid lg:grid-cols-[1fr_1.3fr] gap-12 lg:gap-20">
             <div className="lg:sticky lg:top-28 self-start">
@@ -211,7 +294,7 @@ export default function Home() {
           </div>
         </section>
 
-        {/* Rider CTA — full-bleed brand photography with scrim */}
+        {/* Rider CTA */}
         <section id="riders" className="relative z-10">
           <div className="relative overflow-hidden bg-primary">
             {/* eslint-disable-next-line @next/next/no-img-element */}
@@ -244,12 +327,6 @@ export default function Home() {
                   >
                     Apply as a rider
                   </Link>
-                  <Link
-                    href="/riders"
-                    className="font-semibold text-white/80 hover:text-white transition-colors cursor-pointer"
-                  >
-                    See rider records →
-                  </Link>
                 </div>
               </div>
             </div>
@@ -278,7 +355,7 @@ export default function Home() {
             <ul className="mt-4 space-y-3 text-sm">
               {[
                 ["Track a delivery", "/track"],
-                ["Send a package", "/register?as=client"],
+                ["Send a package", "/send"],
                 ["Become a rider", "/register?as=rider"],
                 ["Sign in", "/login"],
               ].map(([label, href]) => (
@@ -320,4 +397,46 @@ export default function Home() {
       </footer>
     </main>
   );
+}
+
+function Splash() {
+  return (
+    <main className="min-h-screen flex items-center justify-center bg-surface-deep">
+      <div className="h-8 w-8 animate-spin rounded-full border-2 border-primary/20 border-t-primary" />
+    </main>
+  );
+}
+
+// Root route gate. The rider hybrid (Capacitor) app is left untouched — it
+// always sees the landing content as before. For the web/PWA, only a device
+// that has never completed a sign-in gets the marketing landing page; every
+// returning device skips straight to its dashboard (if the session is still
+// live) or to /login (if the session has expired or been signed out).
+// See src/lib/session.ts for how "returning" is tracked.
+export default function Home() {
+  const router = useRouter();
+  const { user, userProfile, loading } = useAuth();
+  const [isNative, setIsNative] = useState<boolean | null>(null);
+  const [returning, setReturning] = useState<boolean | null>(null);
+
+  useEffect(() => {
+    setIsNative(Capacitor.isNativePlatform());
+    setReturning(isReturningDevice());
+  }, []);
+
+  useEffect(() => {
+    if (isNative || !returning || loading) return;
+    if (user) {
+      router.replace(homeRouteForRole(userProfile?.role));
+    } else {
+      router.replace("/login");
+    }
+  }, [isNative, returning, loading, user, userProfile, router]);
+
+  // Still resolving device/session state — avoid flashing the landing page
+  // at a returning user before we know to redirect them away from it.
+  if (isNative === null || returning === null) return <Splash />;
+  if (isNative) return <LandingPage />;
+  if (!returning) return <LandingPage />;
+  return <Splash />;
 }

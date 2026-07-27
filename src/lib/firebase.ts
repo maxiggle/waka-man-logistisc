@@ -1,5 +1,5 @@
 import { initializeApp, getApps, getApp, type FirebaseApp } from "firebase/app";
-import { getAuth, type Auth } from "firebase/auth";
+import { getAuth, GoogleAuthProvider, type Auth } from "firebase/auth";
 import { getFirestore, type Firestore } from "firebase/firestore";
 import { getDatabase, type Database } from "firebase/database";
 
@@ -13,15 +13,16 @@ const firebaseConfig = {
   databaseURL: process.env.NEXT_PUBLIC_FIREBASE_DATABASE_URL,
 };
 
-// Env vars may be absent (demo mode) — export nulls instead of crashing at import.
-const configured = Boolean(firebaseConfig.apiKey && firebaseConfig.projectId);
+export const isFirebaseConfigured = Boolean(firebaseConfig.apiKey && firebaseConfig.projectId);
 
-export const app: FirebaseApp | null = configured
+export const app: FirebaseApp | null = isFirebaseConfigured
   ? getApps().length
     ? getApp()
     : initializeApp(firebaseConfig)
   : null;
 export const auth: Auth | null = app ? getAuth(app) : null;
+export const googleProvider = new GoogleAuthProvider();
 export const db: Firestore | null = app ? getFirestore(app) : null;
 export const rtdb: Database | null =
   app && firebaseConfig.databaseURL ? getDatabase(app) : null;
+

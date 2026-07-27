@@ -2,7 +2,9 @@
 
 import { use, useEffect, useState } from "react";
 import Link from "next/link";
-import { getDelivery, getLocalDelivery, type Delivery } from "@/lib/demo";
+import { doc, onSnapshot } from "firebase/firestore";
+import { db, isFirebaseConfigured } from "@/lib/firebase";
+import type { DeliveryItem } from "@/lib/schemas";
 import LiveTracking from "@/components/LiveTracking";
 
 export default function TrackDeliveryPage({
@@ -11,12 +13,34 @@ export default function TrackDeliveryPage({
   params: Promise<{ id: string }>;
 }) {
   const { id } = use(params);
-  // Looked up in an effect: session-created deliveries live in sessionStorage,
-  // which doesn't exist during server rendering.
-  const [delivery, setDelivery] = useState<Delivery | null | undefined>(undefined);
+  const [delivery, setDelivery] = useState<DeliveryItem | null | undefined>(undefined);
 
   useEffect(() => {
-    setDelivery(getDelivery(id) ?? getLocalDelivery(id) ?? null);
+    if (!isFirebaseConfigured || !db) {
+      setDelivery(null);
+      return;
+    }
+
+    const docRef = doc(db, "deliveries", id);
+    const unsubscribe = onSnapshot(
+      docRef,
+      (snapshot) => {
+        if (snapshot.exists()) {
+          setDelivery({
+            id: snapshot.id,
+            ...snapshot.data(),
+          } as DeliveryItem);
+        } else {
+          setDelivery(null);
+        }
+      },
+      (err) => {
+        console.error("Firestore onSnapshot error:", err);
+        setDelivery(null);
+      }
+    );
+
+    return () => unsubscribe();
   }, [id]);
 
   return (
@@ -35,18 +59,29 @@ export default function TrackDeliveryPage({
       </header>
 
       <div className="mx-auto max-w-6xl px-6 py-10">
-        {delivery === undefined ? null : delivery === null ? (
-          <div className="mx-auto max-w-md rounded-2xl bg-white border border-ink/10 p-10 text-center">
-            <p className="font-bold text-ink">Delivery not found</p>
+        {!isFirebaseConfigured ? (
+          <div className="mx-auto max-w-md rounded-2xl border border-amber-200 bg-amber-50 p-8 text-amber-900 shadow-sm text-center">
+            <h2 className="font-bold text-amber-900 text-lg">Firebase Setup Required</h2>
+            <p className="mt-2 text-sm text-amber-800">
+              Live tracking requires a connected Firebase Firestore database. Please add your credentials to <code className="bg-amber-100 px-1 py-0.5 rounded font-mono text-xs">.env.local</code>.
+            </p>
+          </div>
+        ) : delivery === undefined ? (
+          <div className="p-12 text-center text-ink/55 animate-pulse font-medium">
+            Fetching delivery status from Firestore...
+          </div>
+        ) : delivery === null ? (
+          <div className="mx-auto max-w-md rounded-2xl bg-white border border-ink/10 p-10 text-center shadow-sm">
+            <p className="font-bold text-ink text-lg">Delivery not found</p>
             <p className="mt-2 text-sm text-ink/60">
-              We couldn&apos;t find <span className="font-semibold">{id.toUpperCase()}</span>.
-              Check the tracking number and try again.
+              We couldn&apos;t find <span className="font-semibold">{id.toUpperCase()}</span> in Firestore.
+              Check the tracking ID and try again.
             </p>
             <Link
-              href="/track"
+              href="/send"
               className="mt-6 inline-block rounded-full bg-primary text-white font-semibold px-6 py-3 hover:bg-primary-soft transition-colors"
             >
-              Track another delivery
+              Book a new delivery
             </Link>
           </div>
         ) : (

@@ -3,16 +3,16 @@
 // Web fallback is dev/testing only — browsers suspend it in the background.
 
 import { Capacitor } from "@capacitor/core";
-import {
-  RiderLocation,
-  type RiderPosition,
-} from "@/lib/native/rider-location";
+import { RiderLocation, type RiderPosition } from "@/lib/native/rider-location";
 
 export type { RiderPosition };
 
 export type LocationTracker = {
   /** Resolves true when permission is granted and tracking has started. */
-  start(deliveryId: string, onPosition: (pos: RiderPosition) => void): Promise<boolean>;
+  start(
+    deliveryId: string,
+    onPosition: (pos: RiderPosition) => void,
+  ): Promise<boolean>;
   stop(): Promise<void>;
   readonly source: "native" | "web";
 };
@@ -50,7 +50,8 @@ function createWebTracker(): LocationTracker {
   return {
     source: "web",
     async start(_deliveryId, onPosition) {
-      if (typeof navigator === "undefined" || !navigator.geolocation) return false;
+      if (typeof navigator === "undefined" || !navigator.geolocation)
+        return false;
       return new Promise<boolean>((resolve) => {
         let settled = false;
         watchId = navigator.geolocation.watchPosition(
@@ -63,10 +64,16 @@ function createWebTracker(): LocationTracker {
               lat: pos.coords.latitude,
               lng: pos.coords.longitude,
               accuracy: pos.coords.accuracy,
-              heading: pos.coords.heading !== null && !Number.isNaN(pos.coords.heading) ? pos.coords.heading : null,
-              speed: pos.coords.speed !== null && !Number.isNaN(pos.coords.speed) ? pos.coords.speed : null,
+              heading:
+                pos.coords.heading !== null && !Number.isNaN(pos.coords.heading)
+                  ? pos.coords.heading
+                  : null,
+              speed:
+                pos.coords.speed !== null && !Number.isNaN(pos.coords.speed)
+                  ? pos.coords.speed
+                  : null,
               timestamp: pos.timestamp,
-              isMock: false, // browsers don't expose mock status
+              isMock: false,
             });
           },
           () => {
@@ -89,5 +96,7 @@ function createWebTracker(): LocationTracker {
 }
 
 export function createLocationTracker(): LocationTracker {
-  return Capacitor.isNativePlatform() ? createNativeTracker() : createWebTracker();
+  return Capacitor.isNativePlatform()
+    ? createNativeTracker()
+    : createWebTracker();
 }

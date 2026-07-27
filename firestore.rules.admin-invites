@@ -1,0 +1,76 @@
+// Firestore rules for the admin-invite feature (AuthContext.tsx + src/lib/admin.ts).
+//
+// This is a SNIPPET, not a full ruleset — it only covers the `users.role`
+// field and the new `adminInvites` collection. It is NOT wired up to deploy
+// (there's no firebase.json in this repo yet, and this file isn't named
+// `firestore.rules`), so nothing changes until you deliberately adopt it.
+//
+// To use it:
+//   1. Open your current rules in the Firebase console (Firestore Database →
+//      Rules) and copy them into a local `firestore.rules` file.
+//   2. Merge the `users` and `adminInvites` match blocks below into that
+//      file — do NOT just replace your rules with this file, it doesn't
+//      cover `deliveries` or anything else your app already secures.
+//   3. Add a `firebase.json` with `{ "firestore": { "rules": "firestore.rules" } }`.
+//   4. `firebase deploy --only firestore:rules` yourself once you've reviewed it.
+//
+// Without this deployed, admin promotion is enforced client-side only (same
+// trust level as the rest of the app today) — anyone with devtools access
+// could otherwise call setDoc on their own user doc to set role: "admin".
+//
+// Bootstrap: the very first admin invite has no inviter yet (inviteAdmin()
+// requires isAdmin(), which is chicken-and-egg). Create it once by hand in
+// the Firebase console: Firestore → adminInvites → add document with ID
+// = the admin's lowercased email, fields { email, invitedBy: "console",
+// invitedAt: <epoch ms> }. After that, existing admins can invite more from
+// /admin/team in the app.
+
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function myEmail() {
+      return request.auth.token.email.lower();
+    }
+
+    function isInvited(email) {
+      return exists(/databases/$(database)/documents/adminInvites/$(email));
+    }
+
+    function isAdmin() {
+      return isSignedIn() &&
+        exists(/databases/$(database)/documents/users/$(request.auth.uid)) &&
+        get(/databases/$(database)/documents/users/$(request.auth.uid)).data.role == 'admin';
+    }
+
+    match /users/{uid} {
+      allow read: if isSignedIn() && (request.auth.uid == uid || isAdmin());
+      // A user may only write role: "admin" onto their own doc if their
+      // email currently has an admin invite — otherwise any non-admin role
+      // is fine to self-set (matches today's client/rider self-registration).
+      allow create: if isSignedIn() && request.auth.uid == uid &&
+        (request.resource.data.role != 'admin' || isInvited(myEmail()));
+      allow update: if isSignedIn() &&
+        (
+          (request.auth.uid == uid &&
+            (request.resource.data.role == resource.data.role ||
+             request.resource.data.role != 'admin' ||
+             isInvited(myEmail())))
+          || isAdmin()
+        );
+    }
+
+    match /adminInvites/{email} {
+      // Anyone can check their own invite status (needed on every sign-in);
+      // only admins can browse the full list or create/revoke invites.
+      allow get: if isSignedIn() && (myEmail() == email || isAdmin());
+      allow list: if isAdmin();
+      allow create, delete: if isAdmin();
+      allow update: if false;
+    }
+  }
+}

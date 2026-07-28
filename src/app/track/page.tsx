@@ -3,7 +3,6 @@
 import { useState } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
-import { deliveries } from "@/lib/demo";
 
 export default function TrackPage() {
   const router = useRouter();
@@ -12,9 +11,9 @@ export default function TrackPage() {
 
   const submit = (e: React.FormEvent) => {
     e.preventDefault();
-    const id = code.trim().toUpperCase();
-    if (!deliveries.some((d) => d.id === id)) {
-      setError("No delivery found with that number. Try one of the demo codes below.");
+    const id = code.trim();
+    if (!id) {
+      setError("Please enter a valid tracking number or delivery ID.");
       return;
     }
     router.push(`/track/${id}`);
@@ -41,7 +40,7 @@ export default function TrackPage() {
           Where is my package?
         </h1>
         <p className="mt-3 text-ink/60">
-          Enter the tracking number from your confirmation message.
+          Enter the tracking number or delivery ID from your order confirmation.
         </p>
 
         <form onSubmit={submit} className="mt-8">
@@ -51,7 +50,7 @@ export default function TrackPage() {
               id="tracking"
               value={code}
               onChange={(e) => { setCode(e.target.value); setError(""); }}
-              placeholder="e.g. WM-2481"
+              placeholder="e.g. delivery document ID"
               autoComplete="off"
               className="flex-1 rounded-xl border border-ink/15 bg-white px-5 py-4 font-semibold tracking-wide text-ink placeholder:text-ink/30 focus:outline-none focus:border-primary focus:ring-2 focus:ring-primary/20"
             />
@@ -65,25 +64,15 @@ export default function TrackPage() {
           {error ? <p className="mt-3 text-sm font-medium text-red-600">{error}</p> : null}
         </form>
 
-        <div className="mt-10 rounded-2xl border border-ink/10 bg-white p-6">
-          <p className="text-xs font-bold tracking-[0.2em] uppercase text-ink/40">Demo deliveries</p>
-          <ul className="mt-4 space-y-3">
-            {deliveries.map((d) => (
-              <li key={d.id}>
-                <Link
-                  href={`/track/${d.id}`}
-                  className="flex items-center justify-between rounded-xl border border-ink/10 px-4 py-3 hover:border-accent/50 transition-colors cursor-pointer"
-                >
-                  <span className="font-bold text-primary tracking-wide">{d.id}</span>
-                  <span className="text-sm text-ink/55">
-                    {d.status === "in_transit" && "In transit — watch it move"}
-                    {d.status === "assigned" && "Rider heading to pickup"}
-                    {d.status === "delivered" && "Delivered — see proof"}
-                  </span>
-                </Link>
-              </li>
-            ))}
-          </ul>
+        <div className="mt-10 rounded-2xl border border-ink/10 bg-white p-6 text-center">
+          <p className="text-xs font-bold tracking-[0.2em] uppercase text-ink/40">Need to send a package?</p>
+          <p className="mt-2 text-sm text-ink/60">Book a rider to get real-time GPS tracking for your delivery.</p>
+          <Link
+            href="/send"
+            className="mt-4 inline-block rounded-xl bg-accent text-ink font-bold px-6 py-3 hover:bg-accent-soft transition-colors"
+          >
+            Book a Rider Now
+          </Link>
         </div>
       </div>
     </main>

@@ -1,9 +1,9 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
-import dynamic from "next/dynamic";
 import Link from "next/link";
-import type { Delivery } from "@/lib/demo";
+import dynamic from "next/dynamic";
+import type { DeliveryItem } from "@/lib/schemas";
 import { subscribeToPosition } from "@/lib/tracking";
 import { hasMapbox } from "@/lib/mapbox";
 import type { RiderPosition } from "@/lib/native/rider-location";
@@ -42,11 +42,14 @@ function stageFromProgress(p: number, startedAtPickup: boolean): number {
   return startedAtPickup ? 1 : 0;
 }
 
-export default function LiveTracking({ delivery }: { delivery: Delivery }) {
+export default function LiveTracking({ delivery }: { delivery: DeliveryItem }) {
   const pathRef = useRef<SVGPathElement>(null);
   const doneRef = useRef<SVGPathElement>(null);
   const markerRef = useRef<SVGGElement>(null);
-  const [progress, setProgress] = useState(delivery.startProgress);
+  const startProgress = delivery.startProgress ?? 0;
+  const duration = delivery.duration ?? 80;
+
+  const [progress, setProgress] = useState(startProgress);
   const [rated, setRated] = useState(0);
   const [livePos, setLivePos] = useState<RiderPosition | null>(null);
   const live = livePos !== null;
@@ -60,23 +63,23 @@ export default function LiveTracking({ delivery }: { delivery: Delivery }) {
   // Simulated live movement: advance from startProgress to 1 over `duration`.
   useEffect(() => {
     if (live) return; // real GPS has taken over
-    if (delivery.startProgress >= 1 || delivery.status === "assigned") {
+    if (startProgress >= 1 || delivery.status === "assigned") {
       // Delivered already, or rider not yet at pickup — no route animation.
-      setProgress(delivery.startProgress);
+      setProgress(startProgress);
       return;
     }
     // Wall-clock interval (not rAF): keeps advancing even when the tab is
     // throttled, and resumes at the correct position after backgrounding.
     const t0 = performance.now();
-    const span = 1 - delivery.startProgress;
+    const span = 1 - startProgress;
     const timer = setInterval(() => {
       const elapsed = (performance.now() - t0) / 1000;
-      const p = Math.min(1, delivery.startProgress + span * (elapsed / delivery.duration));
+      const p = Math.min(1, startProgress + span * (elapsed / duration));
       setProgress(p);
       if (p >= 1) clearInterval(timer);
-    }, 80);
+    }, 250);
     return () => clearInterval(timer);
-  }, [delivery, live]);
+  }, [delivery.id, delivery.status, startProgress, duration, live]);
 
   // Imperative SVG updates (cheap: small path, small area).
   useEffect(() => {
@@ -105,7 +108,7 @@ export default function LiveTracking({ delivery }: { delivery: Delivery }) {
   // Real Mapbox map only when a rider is live and a token is configured;
   // otherwise the SVG route (demo simulation) still runs.
   const showMap = live && livePos !== null && hasMapbox();
-  const minsLeft = Math.max(1, Math.ceil((1 - progress) * delivery.duration / 8));
+  const minsLeft = Math.max(1, Math.ceil(((1 - progress) * duration) / 8));
 
   return (
     <div className="grid lg:grid-cols-[1.15fr_1fr] gap-6">
@@ -164,21 +167,25 @@ export default function LiveTracking({ delivery }: { delivery: Delivery }) {
       <div className="flex flex-col gap-4">
         <div className="rounded-3xl bg-[#17141f] text-white p-6">
           <div className="flex items-center gap-4">
-            <div className="h-12 w-12 rounded-full bg-gradient-to-br from-primary-light to-primary flex items-center justify-center font-extrabold">
-              {delivery.rider.initials}
+            <div className="h-12 w-12 rounded-full bg-gradient-to-br from-primary-light to-primary flex items-center justify-center font-extrabold text-lg">
+              {delivery.rider?.initials || (delivery.rider?.name ? delivery.rider.name[0] : "WM")}
             </div>
             <div className="flex-1">
               <p className="font-bold">
-                {live
-                  ? `${delivery.rider.name} is on the way — live GPS`
-                  : delivered
-                  ? `Delivered by ${delivery.rider.name}`
-                  : stage === 1 && !startedAtPickup
+                {delivery.rider
+                  ? live
+                    ? `${delivery.rider.name} is on the way — live GPS`
+                    : delivered
+                    ? `Delivered by ${delivery.rider.name}`
+                    : stage === 1 && !startedAtPickup
                     ? `${delivery.rider.name} is heading to pickup`
-                    : `${delivery.rider.name} is ${minsLeft} min away`}
+                    : `${delivery.rider.name} is ${minsLeft} min away`
+                  : "Matching nearest available rider..."}
               </p>
               <p className="text-sm text-white/50">
-                {delivery.rider.vehicle} · {delivery.rider.plate} · ★ {delivery.rider.rating.toFixed(1)}
+                {delivery.rider
+                  ? `${delivery.rider.vehicle || "Motorbike"} · ${delivery.rider.plate || "WAKA-MAN"} · ★ ${(delivery.rider.rating || 5.0).toFixed(1)}`
+                  : "Dispatching order to nearby fleet"}
               </p>
             </div>
           </div>
@@ -209,15 +216,19 @@ export default function LiveTracking({ delivery }: { delivery: Delivery }) {
             </div>
             <div className="flex-1 space-y-4">
               <div>
-                <p className="font-semibold text-ink">{delivery.pickup}</p>
+                <p className="font-semibold text-ink">
+                  {typeof delivery.pickup === "string" ? delivery.pickup : delivery.pickup?.address}
+                </p>
                 <p className="text-xs text-ink/45">Pickup</p>
               </div>
               <div>
-                <p className="font-semibold text-ink">{delivery.dropoff}</p>
-                <p className="text-xs text-ink/45">Drop-off · {delivery.packageNote}</p>
+                <p className="font-semibold text-ink">
+                  {typeof delivery.dropoff === "string" ? delivery.dropoff : delivery.dropoff?.address}
+                </p>
+                <p className="text-xs text-ink/45">Drop-off · {delivery.packageNote || "Package"}</p>
               </div>
             </div>
-            <p className="font-bold text-primary">{delivery.fare}</p>
+            <p className="font-bold text-primary">{delivery.fare || "₦1,500"}</p>
           </div>
         </div>
 
@@ -242,7 +253,7 @@ export default function LiveTracking({ delivery }: { delivery: Delivery }) {
             </div>
             {rated > 0 && (
               <p className="mt-3 text-center text-sm text-ink/55">
-                Thanks — your {rated}-star rating goes on {delivery.rider.name}&apos;s record.
+                Thanks — your {rated}-star rating goes on {delivery.rider?.name ?? "the rider"}&apos;s record.
               </p>
             )}
           </div>

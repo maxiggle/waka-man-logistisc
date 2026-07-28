@@ -1,5 +1,6 @@
 import type { Metadata, Viewport } from "next";
 import localFont from "next/font/local";
+import { AuthProvider } from "@/context/AuthContext";
 import "./globals.css";
 
 const raleway = localFont({
@@ -41,7 +42,10 @@ export default function RootLayout({
 }>) {
   return (
     <html lang="en" className={`${raleway.variable} h-full antialiased`}>
-      <body className="min-h-full flex flex-col">{children}</body>
+      <body className="min-h-full flex flex-col">
+        <AuthProvider>{children}</AuthProvider>
+      </body>
     </html>
   );
 }
+

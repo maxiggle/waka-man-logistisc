@@ -25,32 +25,62 @@ export const deliveryStatusSchema = z.enum([
   "assigned",
   "picked_up",
   "in_transit",
+  "arrived",
   "delivered",
   "cancelled",
 ]);
 
-export const deliverySchema = z.object({
-  id: z.string(),
-  clientId: z.string(),
-  riderId: z.string().nullable(),
-  status: deliveryStatusSchema,
-  pickup: z.object({ address: z.string(), lat: z.number(), lng: z.number() }),
-  dropoff: z.object({ address: z.string(), lat: z.number(), lng: z.number() }),
-  createdAt: z.number(),
-  deliveredAt: z.number().nullable(),
+export interface DeliveryRiderInfo {
+  name: string;
+  initials: string;
+  vehicle?: string;
+  plate?: string;
+  rating?: number;
+}
+
+export interface DeliveryItem {
+  id: string;
+  clientId?: string;
+  riderId?: string | null;
+  status: z.infer<typeof deliveryStatusSchema>;
+  pickup: string | { address: string; lat?: number; lng?: number };
+  dropoff: string | { address: string; lat?: number; lng?: number };
+  packageNote?: string;
+  fare?: string;
+  code?: string;
+  vehicle?: string;
+  rider?: DeliveryRiderInfo | null;
+  startProgress?: number;
+  duration?: number;
+  createdAt?: number;
+  assignedAt?: number | null;
+  deliveredAt?: number | null;
+}
+
+// Rider self-reported availability, written to riderAvailability/{uid} while a
+// rider is online and looking for jobs. Untrusted input (any signed-in rider
+// can write their own doc) — validate shape/ranges before matching on it,
+// same reasoning as riderPositionSchema below.
+export const riderAvailabilitySchema = z.object({
+  riderId: z.string(),
+  name: z.string(),
+  vehicle: z.string().optional(),
+  lat: z.number().min(-90).max(90),
+  lng: z.number().min(-180).max(180),
+  geohash: z.string().min(1),
+  status: z.enum(["online", "busy"]),
+  updatedAt: z.number().int().positive(),
 });
 
 export const ratingSchema = z.object({
-  id: z.string(),
   deliveryId: z.string(),
-  clientId: z.string(),
   riderId: z.string(),
+  clientId: z.string(),
   stars: z.number().int().min(1).max(5),
-  comment: z.string().max(500).optional(),
+  comment: z.string().optional(),
   createdAt: z.number(),
 });
 
-// Positions crossing the native bridge are untrusted input — validate shape and ranges.
 export const riderPositionSchema = z.object({
   lat: z.number().min(-90).max(90),
   lng: z.number().min(-180).max(180),
@@ -63,6 +93,8 @@ export const riderPositionSchema = z.object({
 
 export type Rider = z.infer<typeof riderSchema>;
 export type Client = z.infer<typeof clientSchema>;
-export type Delivery = z.infer<typeof deliverySchema>;
 export type DeliveryStatus = z.infer<typeof deliveryStatusSchema>;
+
 export type Rating = z.infer<typeof ratingSchema>;
+export type RiderAvailability = z.infer<typeof riderAvailabilitySchema>;
+

@@ -16,6 +16,8 @@ import {
   AVAILABILITY_TTL_MS,
   MAX_SEARCH_RADIUS_KM,
   MAX_CLAIM_ATTEMPTS,
+  MAX_RIDERS_PER_GEOHASH_BOUND,
+  MAX_PENDING_DELIVERIES_SCAN,
   VEHICLE_ELIGIBILITY,
   type ServiceLevel,
   type RiderVehicle,
@@ -64,14 +66,30 @@ function initialsFor(name: string): string {
 
 type AvailabilityCandidate = { id: string; name: string; lat: number; lng: number; distanceKm: number };
 
-/** Online, non-stale riders within MAX_SEARCH_RADIUS_KM of `pickup`, nearest first — vehicle not yet resolved. */
+/**
+ * Online, non-stale riders within MAX_SEARCH_RADIUS_KM of `pickup`, nearest
+ * first — vehicle not yet resolved.
+ *
+ * Each bounding-box read is capped at MAX_RIDERS_PER_GEOHASH_BOUND. This is
+ * an accuracy-for-cost trade: a per-bound limit gives nearest-within-each-
+ * cell, not a true globally-nearest set across the whole search radius —
+ * in a dense bound, a closer rider could be cut off if it sorts later than
+ * the cap within that cell's arbitrary read order. Acceptable at today's
+ * volume; revisit if that's ever the reported cause of a bad match.
+ */
 async function findNearbyOnlineCandidates(db: Firestore, pickup: Geopoint): Promise<AvailabilityCandidate[]> {
   const bounds = geohashQueryBounds(pickup, MAX_SEARCH_RADIUS_KM * 1000);
   const now = Date.now();
 
   const snapshots = await Promise.all(
     bounds.map(([start, end]) =>
-      db.collection(AVAILABILITY_COLLECTION).orderBy("geohash").startAt(start).endAt(end).get(),
+      db
+        .collection(AVAILABILITY_COLLECTION)
+        .orderBy("geohash")
+        .startAt(start)
+        .endAt(end)
+        .limit(MAX_RIDERS_PER_GEOHASH_BOUND)
+        .get(),
     ),
   );
 
@@ -197,6 +215,13 @@ export async function matchNearestRider(
  * Finds and claims the nearest still-pending, vehicle-eligible delivery for
  * a rider who just came online. Pending deliveries have no location index of
  * their own (small volume expected), so this scans them directly.
+ *
+ * Capped at MAX_PENDING_DELIVERIES_SCAN, oldest-first by createdAt — fairer
+ * than arbitrary document order, and gives the cap a defensible meaning
+ * (the longest-waiting jobs are the ones considered). This equality-plus-
+ * order-by query may need a composite Firestore index; if the console
+ * demands one, record it in the Wave 4 firestore.indexes.json ticket rather
+ * than creating it ad hoc from the console link.
  */
 export async function matchNearestDelivery(rider: {
   id: string;
@@ -206,7 +231,12 @@ export async function matchNearestDelivery(rider: {
   vehicle?: string;
 }): Promise<DeliveryCandidate | null> {
   const db = getAdminDb();
-  const snap = await db.collection(DELIVERIES_COLLECTION).where("status", "==", "pending").get();
+  const snap = await db
+    .collection(DELIVERIES_COLLECTION)
+    .where("status", "==", "pending")
+    .orderBy("createdAt", "asc")
+    .limit(MAX_PENDING_DELIVERIES_SCAN)
+    .get();
   if (snap.empty) return null;
 
   const center: Geopoint = [rider.lat, rider.lng];

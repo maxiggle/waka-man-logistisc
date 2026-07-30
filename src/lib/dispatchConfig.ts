@@ -20,6 +20,22 @@ export const MAX_SEARCH_RADIUS_KM = 50;
 /** Stop retrying a match after this many failed claim attempts. */
 export const MAX_CLAIM_ATTEMPTS = 10;
 
+/**
+ * Per geohash-bound cap on the availability query in findEligibleRiders.
+ * Without this, each of the ~9 bounding-box reads is unbounded and grows
+ * with rider density. Note this trades accuracy for cost: a per-bound limit
+ * gives nearest-within-each-cell, not a globally-nearest set across the
+ * whole search radius — see the comment at the call site.
+ */
+export const MAX_RIDERS_PER_GEOHASH_BOUND = 50;
+
+/**
+ * Cap on the pending-deliveries scan in matchNearestDelivery, ordered by
+ * createdAt so the oldest waiting jobs are considered first — fairer than
+ * arbitrary document order, and gives the cap a defensible meaning.
+ */
+export const MAX_PENDING_DELIVERIES_SCAN = 200;
+
 /** Rider vehicle types, matching riderSchema's enum in src/lib/schemas.ts. */
 export type RiderVehicle = "bicycle" | "scooter" | "motorbike" | "car";
 

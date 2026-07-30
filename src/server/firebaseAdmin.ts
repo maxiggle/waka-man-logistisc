@@ -50,9 +50,22 @@ export async function getUidFromRequest(request: NextRequest): Promise<string | 
 
   const app = getAdminApp();
   try {
-    const decoded = await getAuth(app).verifyIdToken(idToken);
+    // checkRevoked: these endpoints assign paid work, so the extra lookup
+    // (whether the token has been revoked, or the account disabled, since
+    // the token was issued) is worth it — otherwise a signed-out or
+    // disabled rider keeps a working token for up to an hour.
+    const decoded = await getAuth(app).verifyIdToken(idToken, true);
     return decoded.uid;
-  } catch {
+  } catch (err) {
+    const code = typeof err === "object" && err && "code" in err ? String((err as { code: unknown }).code) : undefined;
+    if (!code?.startsWith("auth/")) {
+      // Not a recognized rejection (expired/revoked/malformed/disabled) —
+      // most likely a network or infra failure during the revocation
+      // lookup. Still reject the request either way (we can't confirm the
+      // token is valid), but log this distinctly so it isn't mistaken for
+      // routine bad-credentials traffic in the logs.
+      console.error("Token verification failed unexpectedly (possible revocation-check network error):", err);
+    }
     return null;
   }
 }

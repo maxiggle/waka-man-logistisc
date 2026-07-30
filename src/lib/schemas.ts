@@ -1,4 +1,5 @@
 import { z } from "zod";
+import type { ServiceLevel } from "@/lib/dispatchConfig";
 
 export const riderSchema = z.object({
   id: z.string(),
@@ -71,6 +72,25 @@ export const riderAvailabilitySchema = z.object({
   status: z.enum(["online", "busy"]),
   updatedAt: z.number().int().positive(),
 });
+
+// A delivery's requested service tier (untrusted — read back from a
+// client-created Firestore document). Casting `vehicle: string` to
+// ServiceLevel behind nothing but a typeof check let a garbage tier value
+// become silently unmatchable, with no signal anywhere — validate it
+// instead, at every site that reads it off a delivery document.
+export const serviceLevelSchema = z.enum(["standard", "express", "bulk"]);
+
+// Compile-time guarantee that the enum above and dispatchConfig's
+// ServiceLevel union can never drift apart silently — exactly the kind of
+// drift W1F-T1 existed to fix. If either gains or loses a member without
+// updating the other, this line fails to typecheck. Tuple-wrapped to
+// disable TypeScript's default distributive behavior for conditional types
+// over a naked union type parameter — without this, the check runs
+// per-member instead of as a single set-equality comparison and silently
+// fails to catch drift.
+type AssertExactUnion<A, B> = [A] extends [B] ? ([B] extends [A] ? true : false) : false;
+const _serviceLevelMatchesDispatchConfig: AssertExactUnion<z.infer<typeof serviceLevelSchema>, ServiceLevel> = true;
+void _serviceLevelMatchesDispatchConfig;
 
 export const ratingSchema = z.object({
   deliveryId: z.string(),

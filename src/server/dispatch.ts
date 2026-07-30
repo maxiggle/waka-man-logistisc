@@ -11,7 +11,7 @@
 import { geohashQueryBounds, distanceBetween, type Geopoint } from "geofire-common";
 import type { Firestore } from "firebase-admin/firestore";
 import { getAdminDb } from "@/server/firebaseAdmin";
-import { riderAvailabilitySchema } from "@/lib/schemas";
+import { riderAvailabilitySchema, serviceLevelSchema } from "@/lib/schemas";
 import {
   AVAILABILITY_TTL_MS,
   MAX_SEARCH_RADIUS_KM,
@@ -217,12 +217,23 @@ export async function matchNearestDelivery(rider: {
         data.pickup && typeof data.pickup.lat === "number" && typeof data.pickup.lng === "number"
           ? { lat: data.pickup.lat, lng: data.pickup.lng }
           : null;
-      const serviceLevel: ServiceLevel | undefined =
-        typeof data.vehicle === "string" ? (data.vehicle as ServiceLevel) : undefined;
-      return { id: docSnap.id, pickup, serviceLevel };
+      // undefined vehicle = no tier recorded on the delivery, open to any
+      // vehicle (existing behavior). A present-but-invalid tier is a
+      // different case — excluded outright below rather than silently
+      // treated as "open" or matched against a wrong tier.
+      const parsedLevel = serviceLevelSchema.safeParse(data.vehicle);
+      if (data.vehicle !== undefined && !parsedLevel.success) {
+        console.error(`Delivery ${docSnap.id} has an invalid service level, excluding from matching:`, data.vehicle);
+      }
+      const invalidLevel = data.vehicle !== undefined && !parsedLevel.success;
+      const serviceLevel: ServiceLevel | undefined = parsedLevel.success ? parsedLevel.data : undefined;
+      return { id: docSnap.id, pickup, serviceLevel, invalidLevel };
     })
-    .filter((d): d is { id: string; pickup: { lat: number; lng: number }; serviceLevel: ServiceLevel | undefined } => d.pickup !== null)
-    .filter((d) => !d.serviceLevel || isEligible(rider.vehicle, d.serviceLevel))
+    .filter(
+      (d): d is { id: string; pickup: { lat: number; lng: number }; serviceLevel: ServiceLevel | undefined; invalidLevel: boolean } =>
+        d.pickup !== null,
+    )
+    .filter((d) => !d.invalidLevel && (!d.serviceLevel || isEligible(rider.vehicle, d.serviceLevel)))
     .map((d) => ({ id: d.id, distanceKm: distanceBetween(center, [d.pickup.lat, d.pickup.lng]) }))
     .sort((a, b) => a.distanceKm - b.distanceKm);
 

@@ -36,6 +36,14 @@ export const MAX_RIDERS_PER_GEOHASH_BOUND = 50;
  */
 export const MAX_PENDING_DELIVERIES_SCAN = 200;
 
+/**
+ * Per-uid rate limit for POST /api/dispatch/match-delivery — a cheap call
+ * that triggers a full pending-deliveries scan, so it's an easy cost-
+ * amplification vector left unthrottled.
+ */
+export const MATCH_DELIVERY_RATE_LIMIT = 5;
+export const MATCH_DELIVERY_RATE_WINDOW_MS = 10_000;
+
 /** Rider vehicle types, matching riderSchema's enum in src/lib/schemas.ts. */
 export type RiderVehicle = "bicycle" | "scooter" | "motorbike" | "car";
 

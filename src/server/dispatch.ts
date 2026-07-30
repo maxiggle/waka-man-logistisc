@@ -145,10 +145,15 @@ async function tryClaimDelivery(
     return await db.runTransaction(async (tx) => {
       const deliveryRef = db.collection(DELIVERIES_COLLECTION).doc(deliveryId);
       const riderRef = db.collection(AVAILABILITY_COLLECTION).doc(rider.id);
-      const [deliverySnap, riderSnap] = await Promise.all([tx.get(deliveryRef), tx.get(riderRef)]);
+      const [deliverySnap, riderSnap] = await tx.getAll(deliveryRef, riderRef);
 
       if (!deliverySnap.exists) return false;
-      if (deliverySnap.data()?.riderId) return false;
+      const deliveryData = deliverySnap.data();
+      if (deliveryData?.riderId) return false;
+      // The route's pre-transaction status check leaves a window: the
+      // delivery could be cancelled between that read and this transaction.
+      // Re-assert it's still pending here, inside the atomic section.
+      if (deliveryData?.status !== "pending") return false;
 
       if (!riderSnap.exists) return false;
       if (riderSnap.data()?.status !== "online") return false;

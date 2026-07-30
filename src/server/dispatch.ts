@@ -9,7 +9,7 @@
 //   4. Capped claim attempts.
 // src/lib/dispatch.ts stays live until Wave 3 cuts the client over.
 import { geohashQueryBounds, distanceBetween, type Geopoint } from "geofire-common";
-import { adminDb } from "@/server/firebaseAdmin";
+import { getAdminDb } from "@/server/firebaseAdmin";
 import { riderAvailabilitySchema } from "@/lib/schemas";
 import {
   AVAILABILITY_TTL_MS,
@@ -57,12 +57,13 @@ function initialsFor(name: string): string {
 
 /** Online, non-stale, vehicle-eligible riders within MAX_SEARCH_RADIUS_KM of `pickup`, nearest first. */
 async function findEligibleRiders(pickup: Geopoint, serviceLevel: ServiceLevel): Promise<RiderCandidate[]> {
+  const db = getAdminDb();
   const bounds = geohashQueryBounds(pickup, MAX_SEARCH_RADIUS_KM * 1000);
   const now = Date.now();
 
   const snapshots = await Promise.all(
     bounds.map(([start, end]) =>
-      adminDb.collection(AVAILABILITY_COLLECTION).orderBy("geohash").startAt(start).endAt(end).get(),
+      db.collection(AVAILABILITY_COLLECTION).orderBy("geohash").startAt(start).endAt(end).get(),
     ),
   );
 
@@ -103,10 +104,11 @@ async function tryClaimDelivery(
   deliveryId: string,
   rider: { id: string; name: string; vehicle?: string },
 ): Promise<boolean> {
+  const db = getAdminDb();
   try {
-    return await adminDb.runTransaction(async (tx) => {
-      const deliveryRef = adminDb.collection(DELIVERIES_COLLECTION).doc(deliveryId);
-      const riderRef = adminDb.collection(AVAILABILITY_COLLECTION).doc(rider.id);
+    return await db.runTransaction(async (tx) => {
+      const deliveryRef = db.collection(DELIVERIES_COLLECTION).doc(deliveryId);
+      const riderRef = db.collection(AVAILABILITY_COLLECTION).doc(rider.id);
       const [deliverySnap, riderSnap] = await Promise.all([tx.get(deliveryRef), tx.get(riderRef)]);
 
       if (!deliverySnap.exists) return false;
@@ -162,7 +164,8 @@ export async function matchNearestDelivery(rider: {
   lng: number;
   vehicle?: string;
 }): Promise<DeliveryCandidate | null> {
-  const snap = await adminDb.collection(DELIVERIES_COLLECTION).where("status", "==", "pending").get();
+  const db = getAdminDb();
+  const snap = await db.collection(DELIVERIES_COLLECTION).where("status", "==", "pending").get();
   if (snap.empty) return null;
 
   const center: Geopoint = [rider.lat, rider.lng];

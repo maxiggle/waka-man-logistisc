@@ -4,7 +4,7 @@ export const runtime = "nodejs";
 import { NextResponse, type NextRequest } from "next/server";
 import { getUidFromRequest, getAdminDb } from "@/server/firebaseAdmin";
 import { matchNearestRider } from "@/server/dispatch";
-import type { ServiceLevel } from "@/lib/dispatchConfig";
+import { serviceLevelSchema } from "@/lib/schemas";
 
 export async function POST(request: NextRequest) {
   try {
@@ -32,8 +32,17 @@ export async function POST(request: NextRequest) {
       return NextResponse.json({ error: "Delivery has no resolved pickup coordinates" }, { status: 422 });
     }
 
-    const serviceLevel = (typeof delivery.vehicle === "string" ? delivery.vehicle : "standard") as ServiceLevel;
-    const rider = await matchNearestRider(deliveryId, [pickup.lat, pickup.lng], serviceLevel);
+    // Decision: a missing vehicle field defaults to "standard" (the base
+    // tier) rather than rejecting the booking. A present-but-invalid value
+    // is a different case — that's a data problem, not an absent choice —
+    // and is rejected with a 422 instead of silently matching the wrong tier.
+    const parsedLevel = serviceLevelSchema.safeParse(delivery.vehicle ?? "standard");
+    if (!parsedLevel.success) {
+      console.error(`Delivery ${deliveryId} has an invalid service level:`, delivery.vehicle);
+      return NextResponse.json({ error: "Delivery has an invalid service level" }, { status: 422 });
+    }
+
+    const rider = await matchNearestRider(deliveryId, [pickup.lat, pickup.lng], parsedLevel.data);
 
     return NextResponse.json({ rider });
   } catch (err) {

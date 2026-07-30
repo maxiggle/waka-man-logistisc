@@ -24,17 +24,33 @@ function getAdminApp(): App {
   return initializeApp({ credential: cert(serviceAccount) });
 }
 
-export const adminDb: Firestore = getFirestore(getAdminApp());
+// Resolved lazily on every call rather than cached in a module-level
+// variable populated at import — the whole point is that nothing touches
+// credentials until a request actually arrives. getFirestore()/getAdminApp()
+// are cheap on a warm instance (both just look up an already-registered
+// singleton), so there's no cost to not caching this ourselves.
+export function getAdminDb(): Firestore {
+  return getFirestore(getAdminApp());
+}
 
-/** Verifies the `Authorization: Bearer <idToken>` header, returning the caller's uid or null. */
+/**
+ * Verifies the `Authorization: Bearer <idToken>` header, returning the
+ * caller's uid or null. A missing/malformed/invalid/expired token yields
+ * null (→ 401 at the route). A missing FIREBASE_SERVICE_ACCOUNT_B64 is a
+ * different failure mode — an infra/config problem, not an auth problem —
+ * so getAdminApp() is called outside the verify try/catch and its error is
+ * left to propagate; route handlers catch it and return a generic 500
+ * rather than misreporting it as "Unauthorized".
+ */
 export async function getUidFromRequest(request: NextRequest): Promise<string | null> {
   const header = request.headers.get("authorization");
   if (!header?.startsWith("Bearer ")) return null;
   const idToken = header.slice("Bearer ".length).trim();
   if (!idToken) return null;
 
+  const app = getAdminApp();
   try {
-    const decoded = await getAuth(getAdminApp()).verifyIdToken(idToken);
+    const decoded = await getAuth(app).verifyIdToken(idToken);
     return decoded.uid;
   } catch {
     return null;

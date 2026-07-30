@@ -9,6 +9,7 @@
 //   4. Capped claim attempts.
 // src/lib/dispatch.ts stays live until Wave 3 cuts the client over.
 import { geohashQueryBounds, distanceBetween, type Geopoint } from "geofire-common";
+import type { Firestore } from "firebase-admin/firestore";
 import { getAdminDb } from "@/server/firebaseAdmin";
 import { riderAvailabilitySchema } from "@/lib/schemas";
 import {
@@ -37,11 +38,17 @@ export type DeliveryCandidate = {
   distanceKm: number;
 };
 
-/** Riders with no recorded vehicle (Decision #4 legacy accounts) qualify for "standard" only. */
+/**
+ * Riders with no recorded vehicle (Decision #4 legacy accounts) qualify for
+ * "standard" only. An unrecognized vehicle string qualifies for nothing —
+ * this is looked up against the server-trusted users/{uid} document now,
+ * but stays strict on principle: a garbage value should never earn work.
+ */
 function isEligible(vehicle: string | undefined, serviceLevel: ServiceLevel): boolean {
   if (!vehicle) return serviceLevel === "standard";
   const levels = VEHICLE_ELIGIBILITY[vehicle as RiderVehicle];
-  return levels ? levels.includes(serviceLevel) : serviceLevel === "standard";
+  if (!levels) return false;
+  return levels.includes(serviceLevel);
 }
 
 function initialsFor(name: string): string {
@@ -55,9 +62,10 @@ function initialsFor(name: string): string {
   );
 }
 
-/** Online, non-stale, vehicle-eligible riders within MAX_SEARCH_RADIUS_KM of `pickup`, nearest first. */
-async function findEligibleRiders(pickup: Geopoint, serviceLevel: ServiceLevel): Promise<RiderCandidate[]> {
-  const db = getAdminDb();
+type AvailabilityCandidate = { id: string; name: string; lat: number; lng: number; distanceKm: number };
+
+/** Online, non-stale riders within MAX_SEARCH_RADIUS_KM of `pickup`, nearest first — vehicle not yet resolved. */
+async function findNearbyOnlineCandidates(db: Firestore, pickup: Geopoint): Promise<AvailabilityCandidate[]> {
   const bounds = geohashQueryBounds(pickup, MAX_SEARCH_RADIUS_KM * 1000);
   const now = Date.now();
 
@@ -68,7 +76,7 @@ async function findEligibleRiders(pickup: Geopoint, serviceLevel: ServiceLevel):
   );
 
   const seen = new Set<string>();
-  const matches: RiderCandidate[] = [];
+  const candidates: AvailabilityCandidate[] = [];
   for (const snap of snapshots) {
     for (const docSnap of snap.docs) {
       if (seen.has(docSnap.id)) continue;
@@ -81,14 +89,42 @@ async function findEligibleRiders(pickup: Geopoint, serviceLevel: ServiceLevel):
 
       if (rider.status !== "online") continue;
       if (now - rider.updatedAt > AVAILABILITY_TTL_MS) continue;
-      if (!isEligible(rider.vehicle, serviceLevel)) continue;
 
       const distanceKm = distanceBetween([rider.lat, rider.lng], pickup);
       if (distanceKm > MAX_SEARCH_RADIUS_KM) continue;
 
-      matches.push({ id: docSnap.id, name: rider.name, lat: rider.lat, lng: rider.lng, vehicle: rider.vehicle, distanceKm });
+      candidates.push({ id: docSnap.id, name: rider.name, lat: rider.lat, lng: rider.lng, distanceKm });
     }
   }
+
+  return candidates;
+}
+
+/**
+ * Online, non-stale, vehicle-eligible riders within MAX_SEARCH_RADIUS_KM of
+ * `pickup`, nearest first. Vehicle is resolved from each candidate's
+ * server-trusted users/{uid} document — never from riderAvailability, which
+ * is client-writable (a rider could otherwise self-declare "car" and take
+ * bulk-tier jobs). Lookups are batched with getAll() rather than one get()
+ * per candidate.
+ */
+async function findEligibleRiders(pickup: Geopoint, serviceLevel: ServiceLevel): Promise<RiderCandidate[]> {
+  const db = getAdminDb();
+  const candidates = await findNearbyOnlineCandidates(db, pickup);
+  if (candidates.length === 0) return [];
+
+  const userSnaps = await db.getAll(...candidates.map((c) => db.collection("users").doc(c.id)));
+  const vehicleByUid = new Map<string, string | undefined>();
+  userSnaps.forEach((snap, i) => {
+    // Missing user document (deleted account, bad data) is treated as
+    // no-vehicle — standard-only — not skipped and not a crash.
+    const data = snap.exists ? snap.data() : undefined;
+    vehicleByUid.set(candidates[i].id, typeof data?.vehicle === "string" ? data.vehicle : undefined);
+  });
+
+  const matches: RiderCandidate[] = candidates
+    .filter((c) => isEligible(vehicleByUid.get(c.id), serviceLevel))
+    .map((c) => ({ ...c, vehicle: vehicleByUid.get(c.id) }));
 
   matches.sort((a, b) => a.distanceKm - b.distanceKm);
   return matches;

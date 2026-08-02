@@ -17,6 +17,7 @@ import {
   MAX_SEARCH_RADIUS_KM,
   MAX_CLAIM_ATTEMPTS,
   MAX_RIDERS_PER_GEOHASH_BOUND,
+  MAX_VEHICLE_LOOKUP_BATCH,
   MAX_PENDING_DELIVERIES_SCAN,
   VEHICLE_ELIGIBILITY,
   type ServiceLevel,
@@ -131,21 +132,30 @@ async function findEligibleRiders(pickup: Geopoint, serviceLevel: ServiceLevel):
   const candidates = await findNearbyOnlineCandidates(db, pickup);
   if (candidates.length === 0) return [];
 
-  const userSnaps = await db.getAll(...candidates.map((c) => db.collection("users").doc(c.id)));
+  // Sort nearest-first before capping the getAll() fan-out — with
+  // MAX_RIDERS_PER_GEOHASH_BOUND candidates across ~9 geohash bounds, an
+  // uncapped batch could mean hundreds of refs in one call. This only ever
+  // drops the farthest, least-likely-to-be-claimed candidates.
+  const nearest = candidates
+    .slice()
+    .sort((a, b) => a.distanceKm - b.distanceKm)
+    .slice(0, MAX_VEHICLE_LOOKUP_BATCH);
+
+  const userSnaps = await db.getAll(...nearest.map((c) => db.collection("users").doc(c.id)));
   const vehicleByUid = new Map<string, string | undefined>();
   userSnaps.forEach((snap, i) => {
     // Missing user document (deleted account, bad data) is treated as
     // no-vehicle — standard-only — not skipped and not a crash.
     const data = snap.exists ? snap.data() : undefined;
-    vehicleByUid.set(candidates[i].id, typeof data?.vehicle === "string" ? data.vehicle : undefined);
+    vehicleByUid.set(nearest[i].id, typeof data?.vehicle === "string" ? data.vehicle : undefined);
   });
 
-  const matches: RiderCandidate[] = candidates
+  // `nearest` is already distance-sorted (that's the whole point of the
+  // slice above) and filter/map preserve order, so the result needs no
+  // further sort.
+  return nearest
     .filter((c) => isEligible(vehicleByUid.get(c.id), serviceLevel))
     .map((c) => ({ ...c, vehicle: vehicleByUid.get(c.id) }));
-
-  matches.sort((a, b) => a.distanceKm - b.distanceKm);
-  return matches;
 }
 
 /**
@@ -247,23 +257,36 @@ export async function matchNearestDelivery(rider: {
         data.pickup && typeof data.pickup.lat === "number" && typeof data.pickup.lng === "number"
           ? { lat: data.pickup.lat, lng: data.pickup.lng }
           : null;
-      // undefined vehicle = no tier recorded on the delivery, open to any
-      // vehicle (existing behavior). A present-but-invalid tier is a
-      // different case — excluded outright below rather than silently
-      // treated as "open" or matched against a wrong tier.
-      const parsedLevel = serviceLevelSchema.safeParse(data.vehicle);
+      // Missing vehicle field defaults to "standard" — same convention as
+      // match-rider/route.ts, so the two matching directions can't disagree
+      // about what an absent tier means. A present-but-invalid tier is a
+      // different case — excluded outright below, not defaulted.
+      const parsedLevel = serviceLevelSchema.safeParse(data.vehicle ?? "standard");
       if (data.vehicle !== undefined && !parsedLevel.success) {
         console.error(`Delivery ${docSnap.id} has an invalid service level, excluding from matching:`, data.vehicle);
       }
       const invalidLevel = data.vehicle !== undefined && !parsedLevel.success;
       const serviceLevel: ServiceLevel | undefined = parsedLevel.success ? parsedLevel.data : undefined;
-      return { id: docSnap.id, pickup, serviceLevel, invalidLevel };
+      const releasedBy = typeof data.releasedBy === "string" ? data.releasedBy : undefined;
+      return { id: docSnap.id, pickup, serviceLevel, invalidLevel, releasedBy };
     })
     .filter(
-      (d): d is { id: string; pickup: { lat: number; lng: number }; serviceLevel: ServiceLevel | undefined; invalidLevel: boolean } =>
-        d.pickup !== null,
+      (
+        d,
+      ): d is {
+        id: string;
+        pickup: { lat: number; lng: number };
+        serviceLevel: ServiceLevel | undefined;
+        invalidLevel: boolean;
+        releasedBy: string | undefined;
+      } => d.pickup !== null,
     )
-    .filter((d) => !d.invalidLevel && (!d.serviceLevel || isEligible(rider.vehicle, d.serviceLevel)))
+    // A rider who just released this job shouldn't get it back on their
+    // very next sweep — they're still online and nearby, so without this
+    // it bounces straight back to them instead of anyone else getting a
+    // chance at it.
+    .filter((d) => d.releasedBy !== rider.id)
+    .filter((d) => !d.invalidLevel && d.serviceLevel !== undefined && isEligible(rider.vehicle, d.serviceLevel))
     .map((d) => ({ id: d.id, distanceKm: distanceBetween(center, [d.pickup.lat, d.pickup.lng]) }))
     .sort((a, b) => a.distanceKm - b.distanceKm);
 

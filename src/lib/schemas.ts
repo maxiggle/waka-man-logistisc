@@ -31,6 +31,29 @@ export const deliveryStatusSchema = z.enum([
   "cancelled",
 ]);
 
+/**
+ * Legal next-statuses for a rider-driven delivery lifecycle transition,
+ * keyed by current status. Shared between client (button visibility) and
+ * server (the actual authorization check, inside the transaction) so the
+ * two can't drift — same pattern as VEHICLE_ELIGIBILITY in dispatchConfig.ts.
+ *
+ * "pending" here means the assigned rider releasing the job *before*
+ * pickup — a different event from "cancelled", which is reserved for
+ * client/admin-initiated cancellation (no endpoint exists for that yet).
+ * Once a rider has physically picked up the package, release is no longer
+ * offered: there's no sane automated way to return a package to the pool
+ * that a rider is physically holding.
+ */
+export const DELIVERY_STATUS_TRANSITIONS: Record<z.infer<typeof deliveryStatusSchema>, z.infer<typeof deliveryStatusSchema>[]> = {
+  pending: [],
+  assigned: ["picked_up", "pending"],
+  picked_up: ["in_transit"],
+  in_transit: ["arrived"],
+  arrived: ["delivered"],
+  delivered: [],
+  cancelled: [],
+};
+
 export interface DeliveryRiderInfo {
   name: string;
   initials: string;
@@ -48,14 +71,30 @@ export interface DeliveryItem {
   dropoff: string | { address: string; lat?: number; lng?: number };
   packageNote?: string;
   fare?: string;
-  code?: string;
+  // Confirmation code deliberately lives at deliveries/{id}/private/code,
+  // not here — this document is what the assigned rider's own query reads,
+  // and the code must not be in their memory before the recipient tells
+  // them (see src/server/deliveryLifecycle.ts).
   vehicle?: string;
   rider?: DeliveryRiderInfo | null;
-  startProgress?: number;
-  duration?: number;
   createdAt?: number;
   assignedAt?: number | null;
   deliveredAt?: number | null;
+}
+
+export type LatLng = { lat: number; lng: number };
+
+/**
+ * Coordinates for a delivery endpoint, or null when unavailable — the field is
+ * a plain address string on older records, and lat/lng are optional even on the
+ * object form (a booking whose geocode failed).
+ */
+export function coordsOf(
+  place: string | { address: string; lat?: number; lng?: number } | undefined,
+): LatLng | null {
+  if (!place || typeof place === "string") return null;
+  if (typeof place.lat !== "number" || typeof place.lng !== "number") return null;
+  return { lat: place.lat, lng: place.lng };
 }
 
 // Rider self-reported availability, written to riderAvailability/{uid} while a
@@ -111,10 +150,24 @@ export const riderPositionSchema = z.object({
   isMock: z.boolean(),
 });
 
+// An admin-managed service area (serviceAreas/{id}) — the search bias and map
+// fallback centre, never a hard restriction on where a delivery can be booked
+// (see src/lib/serviceAreas.ts). Untrusted the same way any Firestore read is:
+// validate before use rather than trusting a doc shape survived hand edits.
+export const serviceAreaSchema = z.object({
+  name: z.string().min(1),
+  lat: z.number().min(-90).max(90),
+  lng: z.number().min(-180).max(180),
+  isDefault: z.boolean(),
+  active: z.boolean(),
+  createdAt: z.number(),
+});
+
 export type Rider = z.infer<typeof riderSchema>;
 export type Client = z.infer<typeof clientSchema>;
 export type DeliveryStatus = z.infer<typeof deliveryStatusSchema>;
 
 export type Rating = z.infer<typeof ratingSchema>;
 export type RiderAvailability = z.infer<typeof riderAvailabilitySchema>;
+export type ServiceAreaDoc = z.infer<typeof serviceAreaSchema>;
 

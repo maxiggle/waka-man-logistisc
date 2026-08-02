@@ -1,7 +1,8 @@
 // Publish/subscribe layer for live rider positions.
 // Hot path: Firebase RTDB at live/{deliveryId} (latest position only — cost guardrail).
-// When Firebase env vars are absent, a BroadcastChannel stub links same-origin tabs
-// so the whole flow stays demoable locally.
+// Firebase Realtime Database is required — a missing
+// NEXT_PUBLIC_FIREBASE_DATABASE_URL is a configuration error and is surfaced
+// as such, never worked around with a fabricated local fallback.
 
 import { ref, set, onValue, remove } from "firebase/database";
 import { rtdb } from "@/lib/firebase";
@@ -49,15 +50,19 @@ export function publishPosition(deliveryId: string, raw: unknown): PublishResult
   const last = lastPublishAt.get(deliveryId) ?? 0;
   if (now - last < PUBLISH_INTERVAL_MS) return "throttled";
 
+  if (!rtdb) {
+    // No silent local fallback: a missing NEXT_PUBLIC_FIREBASE_DATABASE_URL is a
+    // configuration error, and pretending to publish hides it until someone
+    // notices the client's map never moves.
+    console.error("Cannot publish rider position: Firebase Realtime Database is not configured.");
+    return "rejected";
+  }
+
   lastPublishAt.set(deliveryId, now);
   lastPosition.set(deliveryId, pos);
 
-  if (rtdb) {
-    // Latest-only write; no history kept (cost guardrail).
-    void set(ref(rtdb, `live/${deliveryId}`), pos);
-  } else {
-    channelFor(deliveryId)?.postMessage(pos);
-  }
+  // Latest-only write; no history kept (cost guardrail).
+  void set(ref(rtdb, `live/${deliveryId}`), pos);
   return "published";
 }
 
@@ -73,37 +78,17 @@ export function subscribeToPosition(
   deliveryId: string,
   cb: (pos: RiderPosition) => void,
 ): () => void {
-  if (rtdb) {
-    return onValue(ref(rtdb, `live/${deliveryId}`), (snap) => {
-      const parsed = riderPositionSchema.safeParse(snap.val());
-      if (parsed.success) cb(parsed.data as RiderPosition);
-    });
+  if (!rtdb) {
+    console.error("Cannot subscribe to rider position: Firebase Realtime Database is not configured.");
+    return () => {};
   }
-  const ch = channelFor(deliveryId);
-  if (!ch) return () => {};
-  const handler = (e: MessageEvent) => {
-    const parsed = riderPositionSchema.safeParse(e.data);
+  return onValue(ref(rtdb, `live/${deliveryId}`), (snap) => {
+    const parsed = riderPositionSchema.safeParse(snap.val());
     if (parsed.success) cb(parsed.data as RiderPosition);
-  };
-  ch.addEventListener("message", handler);
-  return () => ch.removeEventListener("message", handler);
+  });
 }
 
-/** True when positions go through Firebase rather than the local stub. */
+/** True when positions go through Firebase. */
 export function isLiveBackendConfigured(): boolean {
   return rtdb !== null;
-}
-
-// --- BroadcastChannel stub (demo without Firebase; same-origin tabs only) ---
-
-const channels = new Map<string, BroadcastChannel>();
-
-function channelFor(deliveryId: string): BroadcastChannel | null {
-  if (typeof BroadcastChannel === "undefined") return null; // SSR / old browser
-  let ch = channels.get(deliveryId);
-  if (!ch) {
-    ch = new BroadcastChannel(`wm-live-${deliveryId}`);
-    channels.set(deliveryId, ch);
-  }
-  return ch;
 }

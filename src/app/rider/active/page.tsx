@@ -11,6 +11,8 @@ import { publishPosition, clearPosition, isLiveBackendConfigured } from "@/lib/t
 import { publishRiderAvailability, clearRiderAvailability } from "@/lib/riderAvailability";
 import { matchNearestDelivery } from "@/lib/dispatch";
 import { AVAILABILITY_PUBLISH_INTERVAL_MS } from "@/lib/dispatchConfig";
+import { advanceDeliveryStatus, completeDelivery, type NonTerminalStatus } from "@/lib/deliveryLifecycle";
+import type { DeliveryStatus } from "@/lib/schemas";
 
 /** Label passed to the native tracker while browsing for jobs (no delivery yet). */
 const IDLE_TRACKING_LABEL = "idle-availability";
@@ -23,20 +25,39 @@ function RiderActive() {
 
   const [mode, setMode] = useState<Mode>(() => (isFirebaseConfigured ? "checking" : "offline"));
   const [deliveryId, setDeliveryId] = useState<string | null>(null);
+  const [deliveryStatus, setDeliveryStatus] = useState<DeliveryStatus | null>(null);
   const [trackingStatus, setTrackingStatus] = useState<"idle" | "starting" | "tracking" | "denied">("idle");
   const [lastFix, setLastFix] = useState<RiderPosition | null>(null);
   const [lastPublishedAt, setLastPublishedAt] = useState<number | null>(null);
   const [mockWarning, setMockWarning] = useState(false);
   const [error, setError] = useState("");
+  const [lifecycleBusy, setLifecycleBusy] = useState(false);
+  const [lifecycleError, setLifecycleError] = useState("");
+  const [codeInput, setCodeInput] = useState("");
 
   const trackerRef = useRef<LocationTracker | null>(null);
   const lastAvailabilityPublishAt = useRef(0);
   const swept = useRef(false);
+  // Tracks the current uid for the unmount-cleanup effect below, which must
+  // run only once (empty deps) but still needs the *latest* uid rather than
+  // whatever `user` was on first render (null, while auth is still resolving).
+  const uidRef = useRef<string | null>(null);
+  useEffect(() => {
+    uidRef.current = user?.uid ?? null;
+  }, [user]);
 
   useEffect(() => {
     if (authLoading) return;
     if (!user) router.replace("/login?redirect=/rider/active");
   }, [authLoading, user, router]);
+
+  // A lifecycle error from a status transition shouldn't linger once the
+  // delivery has actually moved past it — otherwise a stale rejection stays
+  // on screen through subsequent, successful transitions.
+  useEffect(() => {
+    const timer = setTimeout(() => setLifecycleError(""), 0);
+    return () => clearTimeout(timer);
+  }, [deliveryStatus]);
 
   // Detect an active assignment (claimed by matching, or by an admin) in
   // real time — this is what moves a rider from "searching" to "assigned"
@@ -53,9 +74,11 @@ function RiderActive() {
       (snap) => {
         if (!snap.empty) {
           setDeliveryId(snap.docs[0].id);
+          setDeliveryStatus((snap.docs[0].data().status as DeliveryStatus) ?? null);
           setMode("assigned");
         } else {
           setDeliveryId((prev) => (prev ? null : prev));
+          setDeliveryStatus(null);
           setMode((prev) => (prev === "assigned" ? "offline" : prev === "checking" ? "offline" : prev));
         }
       },
@@ -79,44 +102,101 @@ function RiderActive() {
     setTrackingStatus("starting");
     swept.current = false;
 
-    const tracker = createLocationTracker();
-    trackerRef.current = tracker;
-    const ok = await tracker.start(IDLE_TRACKING_LABEL, (pos) => {
-      setLastFix(pos);
-      if (pos.isMock) return; // never publish mock fixes as real availability
+    try {
+      const tracker = createLocationTracker();
+      trackerRef.current = tracker;
+      const ok = await tracker.start(IDLE_TRACKING_LABEL, (pos) => {
+        setLastFix(pos);
+        if (pos.isMock) return; // never publish mock fixes as real availability
 
-      const now = Date.now();
-      if (now - lastAvailabilityPublishAt.current < AVAILABILITY_PUBLISH_INTERVAL_MS) return;
-      lastAvailabilityPublishAt.current = now;
+        const now = Date.now();
+        if (now - lastAvailabilityPublishAt.current < AVAILABILITY_PUBLISH_INTERVAL_MS) return;
+        lastAvailabilityPublishAt.current = now;
 
-      publishRiderAvailability(
-        user.uid,
-        userProfile?.name || user.displayName || "Rider",
-        { lat: pos.lat, lng: pos.lng },
-        "online",
-      )
-        .then(() => {
-          if (swept.current) return;
-          swept.current = true;
-          return matchNearestDelivery({
-            id: user.uid,
-            name: userProfile?.name || user.displayName || "Rider",
-            lat: pos.lat,
-            lng: pos.lng,
+        publishRiderAvailability(
+          user.uid,
+          userProfile?.name || user.displayName || "Rider",
+          { lat: pos.lat, lng: pos.lng },
+          "online",
+        )
+          .then(() => {
+            // Publish succeeded — the rider is genuinely visible to
+            // dispatch now, independent of whether the sweep below finds
+            // them a job. No args: the server derives who's asking from
+            // the bearer token and reads position from the rider's own
+            // availability document — see src/server/dispatch.ts.
+            if (swept.current) return;
+            matchNearestDelivery()
+              .then(() => {
+                swept.current = true;
+              })
+              .catch((err) => {
+                // A failed sweep (rate-limited, transient network) must not
+                // mark `swept` — leave it false so the next position tick
+                // retries. Publishing already succeeded, so the rider IS
+                // online; this isn't worth kicking them offline over, and
+                // a client's own booking will still reach them either way.
+                console.error("Rider sweep-match failed (will retry next tick):", err);
+              });
+          })
+          .catch((err) => {
+            // The UI must not keep saying "Searching" when the rider isn't
+            // actually visible to dispatch — surface the failure and drop
+            // them back out of searching rather than leaving a false
+            // impression that they're online.
+            console.error("Failed to publish rider availability:", err);
+            setError("You're not visible to dispatch right now — check your connection and go online again.");
+            setMode("offline");
+            void stopTracker();
           });
-        })
-        .catch((err) => console.error("Failed to publish rider availability:", err));
-    });
+      });
 
-    setTrackingStatus(ok ? "tracking" : "denied");
-    setMode(ok ? "searching" : "offline");
-  }, [user, userProfile]);
+      setTrackingStatus(ok ? "tracking" : "denied");
+      setMode(ok ? "searching" : "offline");
+    } catch (err) {
+      console.error("Failed to start location tracker:", err);
+      setError("Couldn't start location tracking. Check permissions and try again.");
+      setTrackingStatus("idle");
+      setMode("offline");
+    }
+  }, [user, userProfile, stopTracker]);
 
   const goOffline = useCallback(async () => {
     await stopTracker();
     if (user) await clearRiderAvailability(user.uid).catch(() => {});
     setMode("offline");
   }, [stopTracker, user]);
+
+  // Handles both forward advances (picked_up/in_transit/arrived) and the
+  // pre-pickup release back to "pending" — both are non-terminal from the
+  // delivery's perspective (matchable again), just different directions.
+  const handleAdvance = useCallback(
+    async (status: NonTerminalStatus | "pending") => {
+      if (!deliveryId) return;
+      setLifecycleBusy(true);
+      setLifecycleError("");
+      const result = await advanceDeliveryStatus(deliveryId, status);
+      setLifecycleBusy(false);
+      if (!result.ok) setLifecycleError(result.error);
+      // On success the status-in-filter query above naturally reflects the
+      // new state (including dropping back to "offline" for a release) —
+      // no manual reset needed here.
+    },
+    [deliveryId],
+  );
+
+  const handleComplete = useCallback(async () => {
+    if (!deliveryId) return;
+    setLifecycleBusy(true);
+    setLifecycleError("");
+    const result = await completeDelivery(deliveryId, codeInput);
+    setLifecycleBusy(false);
+    if (!result.ok) {
+      setLifecycleError(result.error);
+      return;
+    }
+    setCodeInput("");
+  }, [deliveryId, codeInput]);
 
   // Once assigned, switch the same tracker over to publishing on the
   // delivery's live channel instead of the idle-availability one.
@@ -160,9 +240,11 @@ function RiderActive() {
   useEffect(() => {
     return () => {
       void trackerRef.current?.stop();
-      if (user) void clearRiderAvailability(user.uid).catch(() => {});
+      // Read the ref, not `user` — `user` here is whatever it was on first
+      // render (null, while auth is still resolving), and that stale
+      // closure meant this cleanup never actually cleared availability.
+      if (uidRef.current) void clearRiderAvailability(uidRef.current).catch(() => {});
     };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   if (authLoading || !user || mode === "checking") {
@@ -299,7 +381,11 @@ function RiderActive() {
                       ? `Last shared ${new Date(lastPublishedAt).toLocaleTimeString()}`
                       : "Not shared yet"}
                     {" · "}
-                    {isLiveBackendConfigured() ? "via Firebase" : "local demo relay"}
+                    {isLiveBackendConfigured() ? (
+                      "via Firebase"
+                    ) : (
+                      <span className="text-red-600 font-semibold">live backend not configured</span>
+                    )}
                   </p>
                 </div>
               )}
@@ -308,6 +394,88 @@ function RiderActive() {
                 <p className="rounded-xl bg-red-50 border border-red-200 text-red-700 text-sm font-medium px-4 py-3">
                   A mock-location app was detected on this device. These positions are not shared.
                 </p>
+              )}
+            </div>
+
+            <div className="mt-6 rounded-2xl bg-white border border-ink/10 p-6 space-y-4">
+              <p className="text-sm font-semibold text-ink/70">Delivery progress</p>
+
+              {lifecycleError && (
+                <p className="rounded-xl bg-red-50 border border-red-200 text-red-700 text-sm font-medium px-4 py-3">
+                  {lifecycleError}
+                </p>
+              )}
+
+              {deliveryStatus === "assigned" && (
+                <button
+                  type="button"
+                  onClick={() => handleAdvance("picked_up")}
+                  disabled={lifecycleBusy}
+                  className="w-full rounded-full bg-primary text-white font-semibold px-6 py-3.5 hover:bg-primary-soft transition-colors cursor-pointer disabled:opacity-60"
+                >
+                  {lifecycleBusy ? "Updating…" : "Mark picked up"}
+                </button>
+              )}
+
+              {deliveryStatus === "picked_up" && (
+                <button
+                  type="button"
+                  onClick={() => handleAdvance("in_transit")}
+                  disabled={lifecycleBusy}
+                  className="w-full rounded-full bg-primary text-white font-semibold px-6 py-3.5 hover:bg-primary-soft transition-colors cursor-pointer disabled:opacity-60"
+                >
+                  {lifecycleBusy ? "Updating…" : "Start delivery"}
+                </button>
+              )}
+
+              {deliveryStatus === "in_transit" && (
+                <button
+                  type="button"
+                  onClick={() => handleAdvance("arrived")}
+                  disabled={lifecycleBusy}
+                  className="w-full rounded-full bg-primary text-white font-semibold px-6 py-3.5 hover:bg-primary-soft transition-colors cursor-pointer disabled:opacity-60"
+                >
+                  {lifecycleBusy ? "Updating…" : "Mark arrived"}
+                </button>
+              )}
+
+              {deliveryStatus === "arrived" && (
+                <div className="space-y-3">
+                  <div>
+                    <label htmlFor="deliveryCode" className="text-xs font-semibold text-ink/60">
+                      Recipient&apos;s 4-digit code
+                    </label>
+                    <input
+                      id="deliveryCode"
+                      value={codeInput}
+                      onChange={(e) => setCodeInput(e.target.value.replace(/\D/g, "").slice(0, 4))}
+                      inputMode="numeric"
+                      autoComplete="off"
+                      maxLength={4}
+                      placeholder="0000"
+                      className="mt-1.5 w-full rounded-xl border border-ink/15 px-4 py-3 text-center font-display text-2xl font-extrabold tracking-[0.3em] tabular-nums focus:outline-none focus:border-primary focus:ring-2 focus:ring-primary/20"
+                    />
+                  </div>
+                  <button
+                    type="button"
+                    onClick={handleComplete}
+                    disabled={lifecycleBusy || codeInput.length !== 4}
+                    className="w-full rounded-full bg-accent text-ink font-semibold px-6 py-3.5 hover:bg-accent-soft transition-colors cursor-pointer disabled:opacity-60"
+                  >
+                    {lifecycleBusy ? "Confirming…" : "Confirm delivery"}
+                  </button>
+                </div>
+              )}
+
+              {deliveryStatus === "assigned" && (
+                <button
+                  type="button"
+                  onClick={() => handleAdvance("pending")}
+                  disabled={lifecycleBusy}
+                  className="w-full rounded-full border border-red-200 text-red-600 font-semibold px-6 py-3 hover:bg-red-50 transition-colors cursor-pointer disabled:opacity-60"
+                >
+                  Release delivery
+                </button>
               )}
             </div>
 

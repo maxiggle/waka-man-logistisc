@@ -2,8 +2,10 @@
 
 import { use, useEffect, useState } from "react";
 import Link from "next/link";
+import { useRouter } from "next/navigation";
 import { doc, onSnapshot } from "firebase/firestore";
 import { db, isFirebaseConfigured } from "@/lib/firebase";
+import { useAuth } from "@/context/AuthContext";
 import type { DeliveryItem } from "@/lib/schemas";
 import LiveTracking from "@/components/LiveTracking";
 
@@ -13,9 +15,17 @@ export default function TrackDeliveryPage({
   params: Promise<{ id: string }>;
 }) {
   const { id } = use(params);
+  const router = useRouter();
+  const { user, loading: authLoading } = useAuth();
   const [delivery, setDelivery] = useState<DeliveryItem | null | undefined>(undefined);
 
   useEffect(() => {
+    if (authLoading) return;
+    if (!user) {
+      router.replace(`/login?redirect=/track/${id}`);
+      return;
+    }
+
     if (!isFirebaseConfigured || !db) {
       setDelivery(null);
       return;
@@ -41,7 +51,15 @@ export default function TrackDeliveryPage({
     );
 
     return () => unsubscribe();
-  }, [id]);
+  }, [id, user, authLoading, router]);
+
+  // Only the client who booked this delivery or the rider it's assigned to
+  // may view it — this is the app-level gate that stands in until rules
+  // are deployed (see firestore.rules), and stays as defense-in-depth
+  // afterward. Neither party matching is treated as "not found" rather
+  // than a distinct "forbidden" state, so a guessed delivery id doesn't
+  // even confirm it exists.
+  const isOwner = !!delivery && !!user && (delivery.clientId === user.uid || delivery.riderId === user.uid);
 
   return (
     <main className="min-h-screen bg-surface-deep">
@@ -66,11 +84,11 @@ export default function TrackDeliveryPage({
               Live tracking requires a connected Firebase Firestore database. Please add your credentials to <code className="bg-amber-100 px-1 py-0.5 rounded font-mono text-xs">.env.local</code>.
             </p>
           </div>
-        ) : delivery === undefined ? (
+        ) : authLoading || !user || delivery === undefined ? (
           <div className="p-12 text-center text-ink/55 animate-pulse font-medium">
             Fetching delivery status from Firestore...
           </div>
-        ) : delivery === null ? (
+        ) : delivery === null || !isOwner ? (
           <div className="mx-auto max-w-md rounded-2xl bg-white border border-ink/10 p-10 text-center shadow-sm">
             <p className="font-bold text-ink text-lg">Delivery not found</p>
             <p className="mt-2 text-sm text-ink/60">

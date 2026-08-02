@@ -1,165 +1,118 @@
 "use client";
 
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useState } from "react";
 import Link from "next/link";
 import dynamic from "next/dynamic";
-import type { DeliveryItem } from "@/lib/schemas";
+import { doc, onSnapshot } from "firebase/firestore";
+import { db } from "@/lib/firebase";
+import { coordsOf, type DeliveryItem, type LatLng } from "@/lib/schemas";
 import { subscribeToPosition } from "@/lib/tracking";
 import { hasMapbox } from "@/lib/mapbox";
+import { FALLBACK_SERVICE_AREA } from "@/lib/dispatchConfig";
+import { getDefaultServiceArea } from "@/lib/serviceAreas";
 import type { RiderPosition } from "@/lib/native/rider-location";
 
 // mapbox-gl touches window at import — load it client-side only.
 const LiveMap = dynamic(() => import("@/components/LiveMap"), { ssr: false });
 
-// Lagos bounding box used to project live GPS fixes into the map viewBox.
-const GEO = { latMin: 6.38, latMax: 6.72, lngMin: 3.1, lngMax: 3.65 };
-const VIEW = { w: 400, h: 520, pad: 40 };
-
-function projectToViewBox(pos: RiderPosition): { x: number; y: number } {
-  const nx = (pos.lng - GEO.lngMin) / (GEO.lngMax - GEO.lngMin);
-  const ny = (GEO.latMax - pos.lat) / (GEO.latMax - GEO.latMin); // lat grows north, y grows down
-  const clamp = (v: number) => Math.min(1, Math.max(0, v));
-  return {
-    x: VIEW.pad + clamp(nx) * (VIEW.w - VIEW.pad * 2),
-    y: VIEW.pad + clamp(ny) * (VIEW.h - VIEW.pad * 2),
-  };
-}
-
-// Right-angled "street" route through the map viewBox (0 0 400 520).
-const ROUTE_D = "M 64 56 L 64 168 L 208 168 L 208 300 L 336 300 L 336 452";
-
 const STAGES = [
   { key: "assigned", label: "Confirmed" },
   { key: "picked_up", label: "Picked up" },
   { key: "in_transit", label: "In transit" },
+  { key: "arrived", label: "Arrived" },
   { key: "delivered", label: "Delivered" },
 ] as const;
 
-function stageFromProgress(p: number, startedAtPickup: boolean): number {
-  if (p >= 1) return 3;
-  if (p > 0.06 || !startedAtPickup) return 2;
-  if (p > 0) return 1;
-  return startedAtPickup ? 1 : 0;
-}
-
 export default function LiveTracking({ delivery }: { delivery: DeliveryItem }) {
-  const pathRef = useRef<SVGPathElement>(null);
-  const doneRef = useRef<SVGPathElement>(null);
-  const markerRef = useRef<SVGGElement>(null);
-  const startProgress = delivery.startProgress ?? 0;
-  const duration = delivery.duration ?? 80;
-
-  const [progress, setProgress] = useState(startProgress);
   const [rated, setRated] = useState(0);
   const [livePos, setLivePos] = useState<RiderPosition | null>(null);
+  const [code, setCode] = useState<string | null>(null);
+  const [codeError, setCodeError] = useState(false);
+  const [fallbackCenter, setFallbackCenter] = useState<LatLng>(FALLBACK_SERVICE_AREA);
   const live = livePos !== null;
 
   // Real rider positions, when a rider is broadcasting for this delivery.
-  // First live fix permanently switches the map off the simulation.
   useEffect(() => {
     return subscribeToPosition(delivery.id, setLivePos);
   }, [delivery.id]);
 
-  // Simulated live movement: advance from startProgress to 1 over `duration`.
+  // The admin-managed default service area, resolved once — until it
+  // resolves (or if it can't), the map falls back to FALLBACK_SERVICE_AREA.
   useEffect(() => {
-    if (live) return; // real GPS has taken over
-    if (startProgress >= 1 || delivery.status === "assigned") {
-      // Delivered already, or rider not yet at pickup — no route animation.
-      setProgress(startProgress);
-      return;
-    }
-    // Wall-clock interval (not rAF): keeps advancing even when the tab is
-    // throttled, and resumes at the correct position after backgrounding.
-    const t0 = performance.now();
-    const span = 1 - startProgress;
-    const timer = setInterval(() => {
-      const elapsed = (performance.now() - t0) / 1000;
-      const p = Math.min(1, startProgress + span * (elapsed / duration));
-      setProgress(p);
-      if (p >= 1) clearInterval(timer);
-    }, 250);
-    return () => clearInterval(timer);
-  }, [delivery.id, delivery.status, startProgress, duration, live]);
+    let cancelled = false;
+    getDefaultServiceArea().then((area) => {
+      if (!cancelled) setFallbackCenter(area);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
-  // Imperative SVG updates (cheap: small path, small area).
+  // The confirmation code lives outside the top-level delivery document
+  // (deliveries/{id}/private/code) so the assigned rider's own query never
+  // receives it — this is the client/recipient's own view, so subscribing
+  // to it here is the legitimate read. An error callback matters here more
+  // than most onSnapshot calls in this app: once rules restrict this path
+  // to the owning client, anyone else hitting this page gets a permission
+  // error that would otherwise be an unhandled console error with the UI
+  // silently stuck on placeholder dots forever.
   useEffect(() => {
-    const path = pathRef.current;
-    const done = doneRef.current;
-    const marker = markerRef.current;
-    if (!path || !done || !marker) return;
-    if (livePos) {
-      const pt = projectToViewBox(livePos);
-      done.style.strokeDasharray = `0 ${path.getTotalLength()}`;
-      marker.setAttribute("transform", `translate(${pt.x}, ${pt.y})`);
-      return;
-    }
-    const total = path.getTotalLength();
-    const at = total * progress;
-    done.style.strokeDasharray = `${at} ${total}`;
-    const pt = path.getPointAtLength(at);
-    marker.setAttribute("transform", `translate(${pt.x}, ${pt.y})`);
-  }, [progress, livePos]);
+    if (!db) return;
+    return onSnapshot(
+      doc(db, "deliveries", delivery.id, "private", "code"),
+      (snap) => {
+        const value = snap.data()?.code;
+        setCode(typeof value === "string" ? value : null);
+        setCodeError(false);
+      },
+      (err) => {
+        console.error("Failed to read delivery confirmation code:", err);
+        setCodeError(true);
+      },
+    );
+  }, [delivery.id]);
 
-  const startedAtPickup = delivery.status !== "assigned";
-  // Live GPS carries no route progress — hold the stepper at "In transit"
-  // instead of inheriting whatever the abandoned simulation reached.
-  const stage = live ? 2 : stageFromProgress(progress, startedAtPickup);
-  const delivered = stage === 3;
-  // Real Mapbox map only when a rider is live and a token is configured;
-  // otherwise the SVG route (demo simulation) still runs.
-  const showMap = live && livePos !== null && hasMapbox();
-  const minsLeft = Math.max(1, Math.ceil(((1 - progress) * duration) / 8));
+  // Stage comes from the delivery's real status — the rider drives these
+  // transitions through /api/deliveries/[id]/status. -1 means "pending", i.e.
+  // not yet assigned, so nothing on the stepper is lit.
+  const stageIndex = STAGES.findIndex((s) => s.key === delivery.status);
+  const delivered = delivery.status === "delivered";
+  const pickupCoords = coordsOf(delivery.pickup);
+  const dropoffCoords = coordsOf(delivery.dropoff);
+  // The map is worth showing as soon as we know *any* real point — the
+  // rider's live fix, or just the pickup/dropoff pair from the booking.
+  const showMap = hasMapbox() && (live || pickupCoords !== null || dropoffCoords !== null);
 
   return (
     <div className="grid lg:grid-cols-[1.15fr_1fr] gap-6">
       {/* Map */}
       <div className="relative rounded-3xl overflow-hidden bg-[#1a1626] min-h-[420px] lg:min-h-[560px]">
         {showMap ? (
-          <LiveMap position={livePos} />
+          <LiveMap position={livePos} pickup={pickupCoords} dropoff={dropoffCoords} fallbackCenter={fallbackCenter} />
         ) : (
-        <svg viewBox="0 0 400 520" className="absolute inset-0 h-full w-full" aria-hidden>
-          {/* street grid */}
-          <defs>
-            <pattern id="grid" width="44" height="44" patternUnits="userSpaceOnUse">
-              <path d="M 44 0 L 0 0 0 44" fill="none" stroke="#241f31" strokeWidth="2" />
-            </pattern>
-          </defs>
-          <rect width="400" height="520" fill="url(#grid)" />
-          {/* remaining route (dashed) */}
-          <path ref={pathRef} d={ROUTE_D} fill="none" stroke="#3d3550" strokeWidth="6" strokeLinecap="round" strokeDasharray="2 12" />
-          {/* travelled route (solid orange) */}
-          <path ref={doneRef} d={ROUTE_D} fill="none" stroke="#f16834" strokeWidth="6" strokeLinecap="round" />
-          {/* pickup + dropoff pins */}
-          <g transform="translate(64,56)">
-            <circle r="12" fill="#f16834" opacity="0.25" />
-            <circle r="6" fill="#f16834" />
-          </g>
-          <g transform="translate(336,452)">
-            <circle r="12" fill="#8a6fc4" opacity="0.3" />
-            <circle r="6" fill="#8a6fc4" />
-          </g>
-          {/* rider marker */}
-          <g ref={markerRef}>
-            <circle r="16" fill="#f16834" opacity="0.25">
-              <animate attributeName="r" values="14;20;14" dur="2s" repeatCount="indefinite" />
-            </circle>
-            <circle r="9" fill="#f16834" stroke="#fff" strokeWidth="2.5" />
-          </g>
-        </svg>
+          <div className="absolute inset-0 flex items-center justify-center px-8 text-center">
+            <p className="text-sm text-white/45">
+              {delivered
+                ? "Delivery complete."
+                : !hasMapbox()
+                ? "Map unavailable — no Mapbox token configured."
+                : delivery.rider
+                ? "Waiting for the rider's live location…"
+                : "Matching nearest available rider…"}
+            </p>
+          </div>
         )}
         <div className="absolute top-4 left-4 z-10 rounded-full bg-black/40 backdrop-blur px-4 py-1.5 text-xs font-semibold text-white/90">
-          {live ? "Live GPS" : delivered ? "Route completed" : "Live · Lagos"}
+          {live ? "Live GPS" : delivered ? "Route completed" : "Not yet live"}
           {(live || !delivered) && (
             <span className="ml-2 inline-block h-2 w-2 rounded-full bg-accent animate-pulse" />
           )}
         </div>
-        {live ? (
+        {live && (
           <p className="absolute bottom-3 right-4 z-10 text-[10px] text-white/40 tabular-nums">
             {livePos.lat.toFixed(5)}, {livePos.lng.toFixed(5)} · updated{" "}
             {new Date(livePos.timestamp).toLocaleTimeString()}
           </p>
-        ) : (
-          <p className="absolute bottom-3 right-4 text-[10px] text-white/30">Demo — simulated route</p>
         )}
       </div>
 
@@ -177,9 +130,11 @@ export default function LiveTracking({ delivery }: { delivery: DeliveryItem }) {
                     ? `${delivery.rider.name} is on the way — live GPS`
                     : delivered
                     ? `Delivered by ${delivery.rider.name}`
-                    : stage === 1 && !startedAtPickup
-                    ? `${delivery.rider.name} is heading to pickup`
-                    : `${delivery.rider.name} is ${minsLeft} min away`
+                    : delivery.status === "arrived"
+                    ? `${delivery.rider.name} has arrived`
+                    : delivery.status === "in_transit"
+                    ? `${delivery.rider.name} is on the way`
+                    : `${delivery.rider.name} is heading to pickup`
                   : "Matching nearest available rider..."}
               </p>
               <p className="text-sm text-white/50">
@@ -194,14 +149,14 @@ export default function LiveTracking({ delivery }: { delivery: DeliveryItem }) {
           <div className="mt-6 flex items-center">
             {STAGES.map((s, i) => (
               <div key={s.key} className={`flex items-center ${i > 0 ? "flex-1" : ""}`}>
-                {i > 0 && <div className={`h-0.5 flex-1 ${i <= stage ? "bg-accent" : "bg-white/15"}`} />}
-                <div className={`h-2.5 w-2.5 rounded-full shrink-0 ${i <= stage ? "bg-accent" : "bg-white/15"}`} />
+                {i > 0 && <div className={`h-0.5 flex-1 ${i <= stageIndex ? "bg-accent" : "bg-white/15"}`} />}
+                <div className={`h-2.5 w-2.5 rounded-full shrink-0 ${i <= stageIndex ? "bg-accent" : "bg-white/15"}`} />
               </div>
             ))}
           </div>
           <div className="mt-2 flex justify-between text-[10px] text-white/40">
             {STAGES.map((s, i) => (
-              <span key={s.key} className={i === stage ? "text-accent font-bold" : ""}>{s.label}</span>
+              <span key={s.key} className={i === stageIndex ? "text-accent font-bold" : ""}>{s.label}</span>
             ))}
           </div>
         </div>
@@ -235,7 +190,7 @@ export default function LiveTracking({ delivery }: { delivery: DeliveryItem }) {
         {delivered ? (
           <div className="rounded-3xl bg-white border border-ink/10 p-6">
             <p className="rounded-xl bg-emerald-50 border border-emerald-200 text-emerald-700 text-sm font-medium px-4 py-3 text-center">
-              Confirmed with code {delivery.code}
+              {codeError ? "Confirmed" : `Confirmed with code ${code ?? "····"}`}
             </p>
             <p className="mt-5 font-bold text-ink text-center">Rate your delivery</p>
             <div className="mt-3 flex justify-center gap-2">
@@ -261,9 +216,15 @@ export default function LiveTracking({ delivery }: { delivery: DeliveryItem }) {
           <div className="rounded-3xl bg-white border border-ink/10 p-6 flex items-center justify-between">
             <div>
               <p className="text-xs font-bold tracking-[0.2em] uppercase text-ink/40">Confirmation code</p>
-              <p className="mt-1 text-sm text-ink/55 max-w-[26ch]">Give this to the rider at the door to confirm delivery.</p>
+              <p className="mt-1 text-sm text-ink/55 max-w-[26ch]">
+                {codeError
+                  ? "You don't have permission to view this delivery's code."
+                  : "Give this to the rider at the door to confirm delivery."}
+              </p>
             </div>
-            <p className="font-display text-3xl font-extrabold tracking-[0.2em] text-primary tabular-nums">{delivery.code}</p>
+            {!codeError && (
+              <p className="font-display text-3xl font-extrabold tracking-[0.2em] text-primary tabular-nums">{code ?? "····"}</p>
+            )}
           </div>
         )}
 

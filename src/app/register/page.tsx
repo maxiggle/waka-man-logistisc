@@ -5,16 +5,10 @@ import Link from "next/link";
 import { useRouter, useSearchParams } from "next/navigation";
 import { doc, setDoc } from "firebase/firestore";
 import { onAuthStateChanged, type Auth, type User } from "firebase/auth";
+import { Capacitor } from "@capacitor/core";
 import { useAuth, type UserRole } from "@/context/AuthContext";
 import { auth, db } from "@/lib/firebase";
-import type { RiderVehicle } from "@/lib/dispatchConfig";
-
-const VEHICLE_OPTIONS: { value: RiderVehicle; label: string }[] = [
-  { value: "bicycle", label: "Bicycle" },
-  { value: "scooter", label: "Scooter" },
-  { value: "motorbike", label: "Motorbike" },
-  { value: "car", label: "Car" },
-];
+import { AVAILABLE_TRANSPORT_MODES, type RiderVehicle } from "@/lib/dispatchConfig";
 
 /**
  * signInWithGoogle() can resolve slightly before the SDK's currentUser is
@@ -41,8 +35,17 @@ function waitForCurrentUser(authInstance: Auth, timeoutMs = 5000): Promise<User>
 function RegisterForm() {
   const router = useRouter();
   const params = useSearchParams();
-  const [role, setRole] = useState<UserRole>(params.get("as") === "rider" ? "rider" : "client");
-  const [vehicle, setVehicle] = useState<RiderVehicle | "">("");
+  const [isNative, setIsNative] = useState<boolean | null>(null);
+  useEffect(() => {
+    setIsNative(Capacitor.isNativePlatform());
+  }, []);
+
+  const [roleChoice, setRoleChoice] = useState<UserRole>(params.get("as") === "rider" ? "rider" : "client");
+  // Native is the rider app — the role is not the user's to choose there.
+  const role: UserRole = isNative ? "rider" : roleChoice;
+  const [vehicle, setVehicle] = useState<RiderVehicle | "">(
+    AVAILABLE_TRANSPORT_MODES.length === 1 ? AVAILABLE_TRANSPORT_MODES[0].id : "",
+  );
   const { signInWithGoogle, isFirebaseConfigured, loading, user } = useAuth();
 
   const [signingIn, setSigningIn] = useState(false);
@@ -94,40 +97,50 @@ function RegisterForm() {
         {role === "rider" ? "Register as a Waka-Man Rider" : "Create Waka-Man Account"}
       </h1>
 
-      <div className="mt-6 grid grid-cols-2 rounded-xl border border-ink/15 bg-white p-1 text-sm font-semibold">
-        {(["client", "rider"] as const).map((r) => (
-          <button
-            key={r}
-            type="button"
-            onClick={() => setRole(r)}
-            className={`rounded-lg py-2.5 transition-colors cursor-pointer ${
-              role === r ? "bg-primary text-white" : "text-ink/55 hover:text-primary"
-            }`}
-          >
-            {r === "client" ? "I send packages" : "I deliver packages"}
-          </button>
-        ))}
-      </div>
+      {!isNative && (
+        <div className="mt-6 grid grid-cols-2 rounded-xl border border-ink/15 bg-white p-1 text-sm font-semibold">
+          {(["client", "rider"] as const).map((r) => (
+            <button
+              key={r}
+              type="button"
+              onClick={() => setRoleChoice(r)}
+              className={`rounded-lg py-2.5 transition-colors cursor-pointer ${
+                role === r ? "bg-primary text-white" : "text-ink/55 hover:text-primary"
+              }`}
+            >
+              {r === "client" ? "I send packages" : "I deliver packages"}
+            </button>
+          ))}
+        </div>
+      )}
 
       {role === "rider" && (
         <div className="mt-6">
-          <p className="mb-2 text-sm font-semibold text-ink/70">What do you ride?</p>
-          <div className="grid grid-cols-2 gap-2">
-            {VEHICLE_OPTIONS.map((opt) => (
-              <button
-                key={opt.value}
-                type="button"
-                onClick={() => setVehicle(opt.value)}
-                className={`rounded-xl border px-4 py-2.5 text-sm font-semibold transition-colors cursor-pointer ${
-                  vehicle === opt.value
-                    ? "border-primary bg-primary text-white"
-                    : "border-ink/15 bg-white text-ink/70 hover:border-primary/40"
-                }`}
-              >
-                {opt.label}
-              </button>
-            ))}
-          </div>
+          {AVAILABLE_TRANSPORT_MODES.length === 1 ? (
+            <p className="text-sm font-semibold text-ink/70">
+              Riding: <span className="text-primary">{AVAILABLE_TRANSPORT_MODES[0].label}</span>
+            </p>
+          ) : (
+            <>
+              <p className="mb-2 text-sm font-semibold text-ink/70">What do you ride?</p>
+              <div className="grid grid-cols-2 gap-2">
+                {AVAILABLE_TRANSPORT_MODES.map((opt) => (
+                  <button
+                    key={opt.id}
+                    type="button"
+                    onClick={() => setVehicle(opt.id)}
+                    className={`rounded-xl border px-4 py-2.5 text-sm font-semibold transition-colors cursor-pointer ${
+                      vehicle === opt.id
+                        ? "border-primary bg-primary text-white"
+                        : "border-ink/15 bg-white text-ink/70 hover:border-primary/40"
+                    }`}
+                  >
+                    {opt.label}
+                  </button>
+                ))}
+              </div>
+            </>
+          )}
         </div>
       )}
 

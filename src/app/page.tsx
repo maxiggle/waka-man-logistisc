@@ -407,12 +407,13 @@ function Splash() {
   );
 }
 
-// Root route gate. The rider hybrid (Capacitor) app is left untouched — it
-// always sees the landing content as before. For the web/PWA, only a device
-// that has never completed a sign-in gets the marketing landing page; every
-// returning device skips straight to its dashboard (if the session is still
-// live) or to /login (if the session has expired or been signed out).
-// See src/lib/session.ts for how "returning" is tracked.
+// Root route gate. Native (Capacitor) is the rider app, not a marketing
+// surface, so the landing page must never appear there — see it straight to
+// Google sign-in / the rider's own home instead. For the web/PWA, only a
+// device that has never completed a sign-in gets the marketing landing
+// page; every returning device skips straight to its dashboard (if the
+// session is still live) or to /login (if the session has expired or been
+// signed out). See src/lib/session.ts for how "returning" is tracked.
 export default function Home() {
   const router = useRouter();
   const { user, userProfile, loading } = useAuth();
@@ -425,18 +426,30 @@ export default function Home() {
   }, []);
 
   useEffect(() => {
-    if (isNative || !returning || loading) return;
-    if (user) {
-      router.replace(homeRouteForRole(userProfile?.role));
-    } else {
-      router.replace("/login");
+    if (isNative === null || returning === null || loading) return;
+
+    // Native is the rider app, not a marketing surface — the landing page must
+    // never appear there. Signed-in users go to their own home; everyone else
+    // goes straight to Google sign-in.
+    //
+    // /register?as=rider rather than /login on purpose: login hardcodes
+    // signInWithGoogle("client"), which would create client accounts for new
+    // riders, and register is also where the rider's vehicle is captured —
+    // without it they only qualify for "standard" jobs (VEHICLE_ELIGIBILITY).
+    if (isNative) {
+      router.replace(user ? homeRouteForRole(userProfile?.role) : "/register?as=rider");
+      return;
     }
+
+    // Web: first-time devices keep the landing page; returning devices skip it.
+    if (!returning) return;
+    router.replace(user ? homeRouteForRole(userProfile?.role) : "/login");
   }, [isNative, returning, loading, user, userProfile, router]);
 
-  // Still resolving device/session state — avoid flashing the landing page
-  // at a returning user before we know to redirect them away from it.
+  // Still resolving device/session state — show the splash rather than flashing
+  // the landing page at someone who is about to be redirected away from it.
   if (isNative === null || returning === null) return <Splash />;
-  if (isNative) return <LandingPage />;
+  if (isNative) return <Splash />;
   if (!returning) return <LandingPage />;
   return <Splash />;
 }

@@ -3,26 +3,34 @@
 import { useEffect, useState, Suspense } from "react";
 import Link from "next/link";
 import { useRouter, useSearchParams } from "next/navigation";
+import { Capacitor } from "@capacitor/core";
 import { useAuth } from "@/context/AuthContext";
 
 function LoginForm() {
   const router = useRouter();
   const searchParams = useSearchParams();
-  const redirect = searchParams.get("redirect") || "/dashboard";
+  const [isNative, setIsNative] = useState<boolean | null>(null);
+  useEffect(() => {
+    setIsNative(Capacitor.isNativePlatform());
+  }, []);
+  // /dashboard is a client screen — on the rider app, land on the rider's own home.
+  const redirect = searchParams.get("redirect") || (isNative ? "/rider/active" : "/dashboard");
   const { signInWithGoogle, isFirebaseConfigured, loading, user } = useAuth();
 
   const [signingIn, setSigningIn] = useState(false);
   const [error, setError] = useState("");
 
   useEffect(() => {
+    if (isNative === null) return;
     if (user) router.replace(redirect);
-  }, [user, redirect, router]);
+  }, [isNative, user, redirect, router]);
 
   const handleGoogleSignIn = async () => {
     try {
       setSigningIn(true);
       setError("");
-      await signInWithGoogle("client");
+      // Native is the rider app; a new account created from here must not be a client.
+      await signInWithGoogle(isNative ? "rider" : "client");
       router.push(redirect);
     } catch (err: unknown) {
       console.error("Google sign-in error:", err);
@@ -65,7 +73,7 @@ function LoginForm() {
           <button
             type="button"
             onClick={handleGoogleSignIn}
-            disabled={signingIn || loading}
+            disabled={signingIn || loading || isNative === null}
             className="w-full flex items-center justify-center gap-3 rounded-xl border border-ink/15 bg-white px-6 py-3.5 font-semibold text-ink hover:bg-surface transition-colors shadow-sm cursor-pointer disabled:opacity-50"
           >
             <svg className="h-5 w-5" viewBox="0 0 24 24">

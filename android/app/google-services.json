@@ -1,0 +1,48 @@
+{
+  "project_info": {
+    "project_number": "566159790904",
+    "firebase_url": "https://wakaman-730cc-default-rtdb.firebaseio.com",
+    "project_id": "wakaman-730cc",
+    "storage_bucket": "wakaman-730cc.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:566159790904:android:282026be1c2ac31f6327cd",
+        "android_client_info": {
+          "package_name": "com.wakaman.rider"
+        }
+      },
+      "oauth_client": [
+        {
+          "client_id": "566159790904-gn8qiddo745ej1m33rvsnma3qjl5n9r3.apps.googleusercontent.com",
+          "client_type": 1,
+          "android_info": {
+            "package_name": "com.wakaman.rider",
+            "certificate_hash": "82beeab66f4da84bd811834bd0464cbe16ab41e6"
+          }
+        },
+        {
+          "client_id": "566159790904-crnt8ibrj0f02b6mupph8r5dn9so755k.apps.googleusercontent.com",
+          "client_type": 3
+        }
+      ],
+      "api_key": [
+        {
+          "current_key": "AIzaSyDLxuur-jrOaQLct0oGVZ0Chi5HvUckG0E"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": [
+            {
+              "client_id": "566159790904-crnt8ibrj0f02b6mupph8r5dn9so755k.apps.googleusercontent.com",
+              "client_type": 3
+            }
+          ]
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}

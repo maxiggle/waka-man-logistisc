@@ -1,0 +1,134 @@
+// Firestore security rules. Currently NOT deployed — there is deliberately
+// no "rules" key in firebase.json yet (see the comment there). Verify
+// against the Firebase emulator before adding it and deploying.
+//
+// The Admin SDK (src/server/*) bypasses these rules entirely — that's what
+// lets the API routes keep working once client writes to the same paths
+// are locked down here. See W3F2-T0.
+
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function myEmail() {
+      return request.auth.token.email.lower();
+    }
+
+    function isInvited(email) {
+      return exists(/databases/$(database)/documents/adminInvites/$(email));
+    }
+
+    function isAdmin() {
+      return isSignedIn() &&
+        exists(/databases/$(database)/documents/users/$(request.auth.uid)) &&
+        get(/databases/$(database)/documents/users/$(request.auth.uid)).data.role == 'admin';
+    }
+
+    // --- users/{uid} (merged from firestore.rules.admin-invites) ---
+    //
+    // KNOWN GAP, discovered wiring this up: src/app/riders/page.tsx queries
+    // the whole `users` collection (`where role == "rider"`) with no auth
+    // gate at all today — a fully public rider directory. This rule (self
+    // or admin only) breaks that page. That's a pre-existing tension in the
+    // admin-invites draft this was merged from, not something introduced
+    // here; resolve deliberately (gate the page behind sign-in and loosen
+    // this to isSignedIn(), or move public-safe rider stats to their own
+    // denormalized collection) rather than widening this rule to "any
+    // signed-in user" without deciding — that would leak every user's
+    // email address (stored on this same document) to every other user.
+    match /users/{uid} {
+      allow read: if isSignedIn() && (request.auth.uid == uid || isAdmin());
+
+      // A user may only write role: "admin" onto their own doc if their
+      // email currently has an admin invite — otherwise any non-admin role
+      // is fine to self-set (matches client/rider self-registration).
+      allow create: if isSignedIn() && request.auth.uid == uid &&
+        (request.resource.data.role != 'admin' || isInvited(myEmail()));
+
+      // deliveriesCompleted/ratingAvg/ratingCount are server-authoritative
+      // (src/server/deliveryLifecycle.ts increments the first; the Admin
+      // SDK bypasses this rule) — a client must never be able to move
+      // either, including via their own otherwise-legitimate self-updates.
+      allow update: if isSignedIn() &&
+        (
+          (request.auth.uid == uid &&
+            (request.resource.data.role == resource.data.role ||
+             request.resource.data.role != 'admin' ||
+             isInvited(myEmail())) &&
+            request.resource.data.get('deliveriesCompleted', 0) == resource.data.get('deliveriesCompleted', 0) &&
+            request.resource.data.get('ratingAvg', 0) == resource.data.get('ratingAvg', 0) &&
+            request.resource.data.get('ratingCount', 0) == resource.data.get('ratingCount', 0))
+          || isAdmin()
+        );
+    }
+
+    match /adminInvites/{email} {
+      // Anyone can check their own invite status (needed on every sign-in);
+      // only admins can browse the full list or create/revoke invites.
+      allow get: if isSignedIn() && (myEmail() == email || isAdmin());
+      allow list: if isAdmin();
+      allow create, delete: if isAdmin();
+      allow update: if false;
+    }
+
+    // --- deliveries/{deliveryId} ---
+    //
+    // A client may create their own delivery, unassigned and pending. Every
+    // status transition and assignment write after that — claim, status
+    // advance, release, complete — is server-only (src/server/dispatch.ts,
+    // src/server/deliveryLifecycle.ts), so client-side update is fully
+    // denied here regardless of caller.
+    match /deliveries/{deliveryId} {
+      allow read: if isSignedIn() &&
+        (resource.data.clientId == request.auth.uid || resource.data.riderId == request.auth.uid || isAdmin());
+
+      allow create: if isSignedIn() &&
+        request.resource.data.clientId == request.auth.uid &&
+        request.resource.data.riderId == null &&
+        request.resource.data.status == 'pending';
+
+      allow update, delete: if false;
+
+      // The confirmation code: readable only by the owning client, never by
+      // the assigned rider (see src/server/deliveryLifecycle.ts — completeDelivery
+      // compares against this doc server-side only). Verified that a naive
+      // recursive `{document=**}` rule on the parent leaks this to the
+      // rider too — it must be named explicitly like this.
+      //
+      // clientId is stored on this document itself, not read off the
+      // parent via get() — a get() call inside a rule does not see sibling
+      // writes in the same batch, and this doc is created in the same
+      // batch as the parent delivery (src/app/send/page.tsx), so the
+      // parent wouldn't exist yet from the rules engine's perspective.
+      match /private/{docId} {
+        allow read: if isSignedIn() && resource.data.clientId == request.auth.uid;
+        allow create: if isSignedIn() && request.resource.data.clientId == request.auth.uid;
+        allow update, delete: if false;
+      }
+    }
+
+    // --- riderAvailability/{uid} ---
+    //
+    // A rider may write only their own presence doc. Nobody reads this
+    // collection from the client — Wave 3 removed the only client reader;
+    // matching now runs exclusively through src/server/dispatch.ts.
+    match /riderAvailability/{uid} {
+      allow read: if false;
+      allow write: if isSignedIn() && request.auth.uid == uid &&
+        request.resource.data.riderId == uid &&
+        request.resource.data.status in ['online', 'busy'];
+      allow delete: if isSignedIn() && request.auth.uid == uid;
+    }
+
+    // Service areas: readable by any signed-in user (the booking form and the
+    // map both need the default centre), writable only by admins.
+    match /serviceAreas/{areaId} {
+      allow read: if isSignedIn();
+      allow create, update, delete: if isAdmin();
+    }
+  }
+}

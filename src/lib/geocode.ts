@@ -29,13 +29,32 @@ function isValidFeature(f: MapboxFeature): f is { place_name: string; center: [n
   return typeof lng === "number" && Number.isFinite(lng) && typeof lat === "number" && Number.isFinite(lat);
 }
 
-/** Forward-geocodes a partial address into a short list of candidates, nearest-relevance first. */
-export async function suggestAddresses(searchText: string): Promise<AddressSuggestion[]> {
+/**
+ * Forward-geocodes a partial address into a short list of candidates,
+ * nearest-relevance first. `proximity` is an ordering bias only — nothing is
+ * excluded, nearby results just rank first; `country` is a hard filter,
+ * since this is a Nigeria-only service and a result elsewhere would create a
+ * delivery that can never be matched.
+ */
+export async function suggestAddresses(
+  searchText: string,
+  proximity?: { lat: number; lng: number },
+): Promise<AddressSuggestion[]> {
   if (!hasMapbox()) return [];
   const trimmed = searchText.trim();
   if (trimmed.length < 3) return [];
 
-  const url = `https://api.mapbox.com/geocoding/v5/mapbox.places/${encodeURIComponent(trimmed)}.json?access_token=${MAPBOX_TOKEN}&autocomplete=true&limit=5`;
+  const params = new URLSearchParams({
+    access_token: MAPBOX_TOKEN,
+    autocomplete: "true",
+    limit: "5",
+    country: "ng",
+  });
+  // NOTE: longitude first, same order as Mapbox's `center` field. Reversing
+  // this silently puts the bias in the ocean and search quietly gets no better.
+  if (proximity) params.set("proximity", `${proximity.lng},${proximity.lat}`);
+
+  const url = `https://api.mapbox.com/geocoding/v5/mapbox.places/${encodeURIComponent(trimmed)}.json?${params.toString()}`;
   const res = await fetch(url);
   if (!res.ok) throw new Error("Failed to look up address suggestions.");
 

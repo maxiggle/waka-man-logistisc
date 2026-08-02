@@ -1,5 +1,5 @@
-// Mapbox is optional — when the token is absent the tracking view falls back to
-// the SVG route, so the demo keeps working without any map config.
+// Mapbox is optional — when the token is absent the tracking view hides the
+// map and shows a text placeholder instead of pretending to render one.
 export const MAPBOX_TOKEN = process.env.NEXT_PUBLIC_MAPBOX_TOKEN ?? "";
 
 export function hasMapbox(): boolean {

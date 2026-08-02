@@ -40,6 +40,7 @@ const ICONS = {
   exit: "M15.75 9V5.25A2.25 2.25 0 0013.5 3h-6a2.25 2.25 0 00-2.25 2.25v13.5A2.25 2.25 0 007.5 21h6a2.25 2.25 0 002.25-2.25V15M18 12H8.25m9.75 0-3-3m3 3-3 3",
   grid: "M3.75 6A2.25 2.25 0 016 3.75h2.25A2.25 2.25 0 0110.5 6v2.25a2.25 2.25 0 01-2.25 2.25H6a2.25 2.25 0 01-2.25-2.25V6zM3.75 15.75A2.25 2.25 0 016 13.5h2.25a2.25 2.25 0 012.25 2.25V18a2.25 2.25 0 01-2.25 2.25H6A2.25 2.25 0 013.75 18v-2.25zM13.5 6a2.25 2.25 0 012.25-2.25H18A2.25 2.25 0 0120.25 6v2.25A2.25 2.25 0 0118 10.5h-2.25a2.25 2.25 0 01-2.25-2.25V6zM13.5 15.75a2.25 2.25 0 012.25-2.25H18a2.25 2.25 0 012.25 2.25V18A2.25 2.25 0 0118 20.25h-2.25A2.25 2.25 0 0113.5 18v-2.25z",
   refresh: "M16.023 9.348h4.992v-.001M2.985 19.644v-4.992m0 0h4.992m-4.993 0l3.181 3.183a8.25 8.25 0 0013.803-3.7M4.031 9.865a8.25 8.25 0 0113.803-3.7l3.181 3.182m0-4.991v4.99",
+  pin: "M15 10.5a3 3 0 11-6 0 3 3 0 016 0z M19.5 10.5c0 7.142-7.5 11.25-7.5 11.25S4.5 17.642 4.5 10.5a7.5 7.5 0 1115 0z",
 };
 
 function Icon({ path, className }: { path: string; className?: string }) {
@@ -230,6 +231,10 @@ export default function AdminPage() {
         <Icon path={ICONS.admins} className="h-4 w-4" />
         Manage admins
       </Link>
+      <Link href="/admin/areas" className="flex items-center gap-3 rounded-xl px-3 py-2.5 text-sm font-semibold text-white/60 hover:text-white hover:bg-white/5 transition-colors cursor-pointer">
+        <Icon path={ICONS.pin} className="h-4 w-4" />
+        Service areas
+      </Link>
       <Link href="/" className="flex items-center gap-3 rounded-xl px-3 py-2.5 text-sm font-semibold text-white/60 hover:text-white hover:bg-white/5 transition-colors cursor-pointer">
         <Icon path={ICONS.exit} className="h-4 w-4" />
         Exit
@@ -312,6 +317,7 @@ export default function AdminPage() {
             <a href="#deliveries" className="font-semibold text-white/60 hover:text-white transition-colors cursor-pointer">Deliveries</a>
             <a href="#riders" className="font-semibold text-white/60 hover:text-white transition-colors cursor-pointer">Riders</a>
             <Link href="/admin/team" className="font-semibold text-white/60 hover:text-white transition-colors cursor-pointer">Manage admins</Link>
+            <Link href="/admin/areas" className="font-semibold text-white/60 hover:text-white transition-colors cursor-pointer">Service areas</Link>
             <Link href="/" className="font-semibold text-white/60 hover:text-white transition-colors cursor-pointer">Exit</Link>
           </div>
         </header>
@@ -341,6 +347,12 @@ export default function AdminPage() {
                     <Icon path={ICONS.refresh} className={`h-4 w-4 ${refreshing ? "animate-spin" : ""}`} />
                     Refresh
                   </button>
+                  <Link
+                    href="/admin/areas"
+                    className="rounded-xl bg-white/5 border border-white/10 text-sm font-semibold text-white/80 px-4 py-2.5 hover:bg-white/10 transition-colors cursor-pointer"
+                  >
+                    Service areas
+                  </Link>
                   <Link
                     href="/admin/team"
                     className="rounded-xl bg-accent text-[#141019] text-sm font-bold px-4 py-2.5 hover:bg-accent-soft transition-colors cursor-pointer"

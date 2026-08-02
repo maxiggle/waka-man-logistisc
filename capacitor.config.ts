@@ -15,6 +15,17 @@ const config: CapacitorConfig = {
     url: serverUrl,
     cleartext: serverUrl.startsWith("http://"),
   },
+  plugins: {
+    FirebaseAuthentication: {
+      // The Firebase JS SDK stays the single source of auth truth for the whole
+      // app (AuthContext's onAuthStateChanged drives everything). skipNativeAuth
+      // makes the plugin hand back the Google credential WITHOUT establishing its
+      // own separate native Firebase session, which we then exchange via
+      // signInWithCredential — one session, not two that can drift apart.
+      skipNativeAuth: true,
+      providers: ["google.com"],
+    },
+  },
 };
 
 export default config;

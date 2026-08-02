@@ -5,7 +5,6 @@ import {
   useCallback,
   useContext,
   useEffect,
-  useRef,
   useState,
   type ReactNode,
 } from "react";
@@ -19,17 +18,21 @@ import {
 } from "firebase/auth";
 import { doc, getDoc, setDoc } from "firebase/firestore";
 import { Capacitor } from "@capacitor/core";
-import { App as CapacitorApp } from "@capacitor/app";
-import { Browser } from "@capacitor/browser";
+import { FirebaseAuthentication } from "@capacitor-firebase/authentication";
 import { auth, googleProvider, db, isFirebaseConfigured } from "@/lib/firebase";
 import { isEmailInvited } from "@/lib/admin";
 import { markReturningDevice } from "@/lib/session";
 
-// Native sign-in bridge: Google blocks OAuth inside embedded WebViews, so the
-// rider app opens the same Google sign-in flow in the system browser
-// (/auth/native-callback) and gets handed back the raw Google credential via
-// a custom-scheme deep link (see capacitor.config.ts appId + AndroidManifest).
-const NATIVE_CALLBACK_SCHEME = "com.wakaman.rider://auth-callback";
+// The native Google Sign-In sheet rejects when the user dismisses it. On Android
+// that arrives as ApiException status 12501; the plugin's wording varies across
+// platforms, so match defensively rather than on one exact string.
+function normalizeSignInError(err: unknown): Error {
+  const raw = err instanceof Error ? err.message : String(err ?? "");
+  if (/12501|cancell?ed|canceled|closed by user/i.test(raw)) {
+    return new Error("Sign-in was cancelled.");
+  }
+  return new Error(raw || "Google sign-in failed.");
+}
 
 export type UserRole = "client" | "rider" | "admin";
 
@@ -67,10 +70,32 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   const [user, setUser] = useState<User | null>(null);
   const [userProfile, setUserProfile] = useState<UserProfile | null>(null);
   const [loading, setLoading] = useState(true);
-  const pendingNativeSignIn = useRef<{
-    resolve: () => void;
-    reject: (err: Error) => void;
-  } | null>(null);
+
+  // Read-only profile load. Deliberately does NOT create a missing document:
+  // only the sign-in path knows which role the user asked for, and having this
+  // create one too meant whichever of the two finished first decided the role —
+  // a rider registration could silently end up as role "client".
+  const loadUserProfile = async (firebaseUser: User): Promise<UserProfile | null> => {
+    if (!db) return null;
+    const userRef = doc(db, "users", firebaseUser.uid);
+    const snap = await getDoc(userRef);
+    if (!snap.exists()) {
+      setUserProfile(null);
+      return null;
+    }
+
+    const existing = snap.data() as UserProfile;
+    const invited = firebaseUser.email ? await isEmailInvited(firebaseUser.email) : false;
+    if (invited && existing.role !== "admin") {
+      const promoted: UserProfile = { ...existing, role: "admin" };
+      await setDoc(userRef, { role: "admin" }, { merge: true });
+      setUserProfile(promoted);
+      return promoted;
+    }
+
+    setUserProfile(existing);
+    return existing;
+  };
 
   // Single source of truth for reading/creating a user's Firestore profile.
   // Admin status is invite-gated (see src/lib/admin.ts): a matching
@@ -111,54 +136,6 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     return existing;
   };
 
-  // Native (Capacitor) Google sign-in bridge: the deep link opened by
-  // /auth/native-callback lands here with the raw Google credential, which we
-  // exchange for a Firebase session and use to resolve the pending promise
-  // that signInWithGoogle() handed back to the caller.
-  useEffect(() => {
-    if (!Capacitor.isNativePlatform()) return;
-
-    const urlListener = CapacitorApp.addListener("appUrlOpen", async ({ url }) => {
-      if (!url.startsWith(NATIVE_CALLBACK_SCHEME)) return;
-      const pending = pendingNativeSignIn.current;
-      pendingNativeSignIn.current = null;
-      await Browser.close().catch(() => {});
-
-      try {
-        const params = new URL(url).searchParams;
-        const error = params.get("error");
-        const idToken = params.get("idToken");
-        const accessToken = params.get("accessToken");
-        const role = (params.get("role") as UserRole) || "client";
-
-        if (error) throw new Error(error);
-        if (!idToken || !auth) throw new Error("Google sign-in did not return a credential.");
-
-        const credential = GoogleAuthProvider.credential(idToken, accessToken || undefined);
-        const result = await signInWithCredential(auth, credential);
-        await syncUserProfile(result.user, role);
-        pending?.resolve();
-      } catch (err) {
-        pending?.reject(err instanceof Error ? err : new Error("Google sign-in failed."));
-      }
-    });
-
-    // If the user backs out of the system browser tab without finishing
-    // sign-in, the app resumes with no deep link — clear the hung promise
-    // instead of leaving the caller awaiting forever.
-    const resumeListener = CapacitorApp.addListener("resume", () => {
-      setTimeout(() => {
-        pendingNativeSignIn.current?.reject(new Error("Sign-in was cancelled."));
-        pendingNativeSignIn.current = null;
-      }, 1500);
-    });
-
-    return () => {
-      urlListener.then((l) => l.remove());
-      resumeListener.then((l) => l.remove());
-    };
-  }, []);
-
   useEffect(() => {
     if (!auth || !isFirebaseConfigured) {
       setLoading(false);
@@ -174,7 +151,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         // show for it anymore. See src/lib/session.ts.
         markReturningDevice();
         try {
-          await syncUserProfile(firebaseUser);
+          await loadUserProfile(firebaseUser);
         } catch (err) {
           console.error("Failed to sync user profile with Firestore:", err);
         }
@@ -194,13 +171,25 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     }
 
     if (Capacitor.isNativePlatform()) {
-      // Google blocks OAuth inside embedded WebViews, so hand off to the
-      // system browser and wait for the appUrlOpen listener above to settle
-      // this promise once the deep link callback lands.
-      await Browser.open({ url: `${window.location.origin}/auth/native-callback?role=${role}` });
-      return new Promise<void>((resolve, reject) => {
-        pendingNativeSignIn.current = { resolve, reject };
-      });
+      // Native Google account picker via Play Services — no browser tab, and no
+      // OAuth redirect, so Firebase's authorized-domain list doesn't apply. That's
+      // what lets this work against a LAN dev server as well as the deployed URL.
+      let result;
+      try {
+        result = await FirebaseAuthentication.signInWithGoogle();
+      } catch (err) {
+        // Log the raw error before normalizing — the exact Android message is
+        // worth knowing when refining the match above.
+        console.error("Native Google sign-in failed:", err);
+        throw normalizeSignInError(err);
+      }
+      const idToken = result.credential?.idToken;
+      if (!idToken) throw new Error("Google sign-in did not return a credential.");
+
+      const credential = GoogleAuthProvider.credential(idToken, result.credential?.accessToken);
+      const nativeResult = await signInWithCredential(auth, credential);
+      await syncUserProfile(nativeResult.user, role);
+      return;
     }
 
     const result = await signInWithPopup(auth, googleProvider);
@@ -208,6 +197,9 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   };
 
   const signOut = async () => {
+    if (Capacitor.isNativePlatform()) {
+      await FirebaseAuthentication.signOut().catch(() => {});
+    }
     if (auth) {
       await firebaseSignOut(auth);
       setUser(null);
@@ -223,7 +215,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   // from a page's own useEffect without re-triggering on every render.
   const refreshUserProfile = useCallback(async (): Promise<UserProfile | null> => {
     if (!user) return null;
-    return syncUserProfile(user);
+    return loadUserProfile(user);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [user]);
 

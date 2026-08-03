@@ -35,14 +35,14 @@ export function getAdminDb(): Firestore {
 
 /**
  * Verifies the `Authorization: Bearer <idToken>` header, returning the
- * caller's uid or null. A missing/malformed/invalid/expired token yields
+ * decoded token or null. A missing/malformed/invalid/expired token yields
  * null (→ 401 at the route). A missing FIREBASE_SERVICE_ACCOUNT_B64 is a
  * different failure mode — an infra/config problem, not an auth problem —
  * so getAdminApp() is called outside the verify try/catch and its error is
  * left to propagate; route handlers catch it and return a generic 500
  * rather than misreporting it as "Unauthorized".
  */
-export async function getUidFromRequest(request: NextRequest): Promise<string | null> {
+async function verifyRequestToken(request: NextRequest) {
   const header = request.headers.get("authorization");
   if (!header?.startsWith("Bearer ")) return null;
   const idToken = header.slice("Bearer ".length).trim();
@@ -54,8 +54,7 @@ export async function getUidFromRequest(request: NextRequest): Promise<string | 
     // (whether the token has been revoked, or the account disabled, since
     // the token was issued) is worth it — otherwise a signed-out or
     // disabled rider keeps a working token for up to an hour.
-    const decoded = await getAuth(app).verifyIdToken(idToken, true);
-    return decoded.uid;
+    return await getAuth(app).verifyIdToken(idToken, true);
   } catch (err) {
     const code = typeof err === "object" && err && "code" in err ? String((err as { code: unknown }).code) : undefined;
     if (!code?.startsWith("auth/")) {
@@ -68,4 +67,30 @@ export async function getUidFromRequest(request: NextRequest): Promise<string | 
     }
     return null;
   }
+}
+
+export async function getUidFromRequest(request: NextRequest): Promise<string | null> {
+  const decoded = await verifyRequestToken(request);
+  return decoded?.uid ?? null;
+}
+
+/**
+ * Same verification as getUidFromRequest, plus the identity claims carried
+ * by the token itself. Two callers, both of which need an identity the
+ * request body must not be trusted to supply:
+ *  - payment initialization (src/server/payments.ts), as an email fallback
+ *    when a delivery has no stored clientEmail;
+ *  - booking (src/server/deliveries.ts), which stamps clientName/clientEmail
+ *    onto the delivery from here rather than from the submitted form.
+ */
+export async function getUidAndEmailFromRequest(
+  request: NextRequest,
+): Promise<{ uid: string; email: string | null; name: string | null } | null> {
+  const decoded = await verifyRequestToken(request);
+  if (!decoded) return null;
+  return {
+    uid: decoded.uid,
+    email: decoded.email ?? null,
+    name: typeof decoded.name === "string" ? decoded.name : null,
+  };
 }

@@ -3,22 +3,31 @@
 import { useState, useEffect, Suspense } from "react";
 import Link from "next/link";
 import { useRouter, useSearchParams } from "next/navigation";
-import { collection, doc, writeBatch } from "firebase/firestore";
-import { db, isFirebaseConfigured } from "@/lib/firebase";
+import { isFirebaseConfigured } from "@/lib/firebase";
 import { useAuth } from "@/context/AuthContext";
 import { matchNearestRider } from "@/lib/dispatch";
+import { createDelivery } from "@/lib/deliveries";
 import { isGeocodingConfigured, type AddressSuggestion } from "@/lib/geocode";
-import { BOOKABLE_SERVICE_LEVELS, type ServiceLevel } from "@/lib/dispatchConfig";
+import { BOOKABLE_SERVICE_LEVELS, SERVICE_LEVEL_FARE_KOBO, type ServiceLevel } from "@/lib/dispatchConfig";
 import { currentPositionIfPermitted, getDefaultServiceArea } from "@/lib/serviceAreas";
+import { formatNaira } from "@/lib/money";
 import type { LatLng } from "@/lib/schemas";
 import AddressAutocomplete from "@/components/AddressAutocomplete";
 
 // Keyed by ServiceLevel (not a plain array) so tsc fails the moment this
 // tier list and dispatchConfig's ServiceLevel drift apart in either direction.
+//
+// These prices are a *preview*, shown before a delivery exists to be quoted.
+// They are only trustworthy while fares are flat per tier, where reading the
+// shared table client-side gives exactly what the server will compute. The
+// price that binds is the one the server stamps at booking and returns —
+// this is what the customer chooses between, not what they are charged.
+// Adding a distance component means this preview has to come from a server
+// quote endpoint instead; the table read below silently becomes wrong.
 const VEHICLE_TIERS: Record<ServiceLevel, { name: string; meta: string; fare: string; hot: boolean }> = {
-  express: { name: "Express", meta: "Motorbike · pickup in ~4 min", fare: "₦1,500", hot: true },
-  standard: { name: "Standard", meta: "Scooter · pickup in ~9 min", fare: "₦900", hot: false },
-  bulk: { name: "Bulk", meta: "Car · pickup in ~14 min", fare: "₦2,400", hot: false },
+  express: { name: "Express", meta: "Motorbike · pickup in ~4 min", fare: formatNaira(SERVICE_LEVEL_FARE_KOBO.express), hot: true },
+  standard: { name: "Standard", meta: "Scooter · pickup in ~9 min", fare: formatNaira(SERVICE_LEVEL_FARE_KOBO.standard), hot: false },
+  bulk: { name: "Bulk", meta: "Car · pickup in ~14 min", fare: formatNaira(SERVICE_LEVEL_FARE_KOBO.bulk), hot: false },
 };
 const TIER_ORDER: ServiceLevel[] = ["express", "standard", "bulk"];
 // Only tiers an available transport mode can actually fulfil — booking one
@@ -76,7 +85,10 @@ function SendForm() {
     e.preventDefault();
     if (requesting) return;
 
-    if (!isFirebaseConfigured || !db) {
+    // No direct Firestore handle needed any more — booking goes through
+    // /api/deliveries. Firebase still has to be configured for the ID token
+    // that call is authorized with.
+    if (!isFirebaseConfigured) {
       setError("Firebase is not configured. Please configure your .env.local to enable live delivery booking.");
       return;
     }
@@ -106,56 +118,30 @@ function SendForm() {
       setError("");
 
       const selectedVehicle = vehicles.find((v) => v.key === vehicle);
-      const deliveryData = {
-        clientId: user.uid,
-        clientName: userProfile?.name || user.displayName || "Client",
-        clientEmail: user.email || "",
-        riderId: null,
-        status: "pending",
+
+      // The server writes the delivery (W5-T4) — the browser can't create
+      // one any more, and no longer sends a price. It submits the trip and
+      // gets back the fare the server froze onto the document. Identity,
+      // status, and quotedAmountKobo are all decided there; sending them
+      // from here would only be a suggestion the server ignores.
+      const { deliveryId } = await createDelivery({
         pickup: { address: pickupResolved.address, lat: pickupResolved.lat, lng: pickupResolved.lng },
         dropoff: { address: dropoffResolved.address, lat: dropoffResolved.lat, lng: dropoffResolved.lng },
-        packageNote: `${selectedVehicle?.name} · ${vehicle.toUpperCase()}`,
-        fare: selectedVehicle?.fare || "₦1,500",
         vehicle,
-        createdAt: Date.now(),
-        updatedAt: Date.now(),
-      };
-
-      // One batch: a delivery with no confirmation code doc can never be
-      // completed (completeDelivery permanently rejects it, blaming the
-      // recipient for a booking failure that isn't theirs) — so the two
-      // writes must succeed or fail together, not as independent addDoc/setDoc
-      // calls.
-      const docRef = doc(collection(db, "deliveries"));
-      const codeRef = doc(db, "deliveries", docRef.id, "private", "code");
-      const batch = writeBatch(db);
-      batch.set(docRef, deliveryData);
-      // The confirmation code lives outside the delivery document itself —
-      // the assigned rider's own "my active deliveries" query reads that
-      // top-level doc, so a code stored on it would be in the rider's
-      // memory before the recipient ever tells them. completeDelivery
-      // compares against this doc server-side only (src/server/deliveryLifecycle.ts).
-      // clientId is denormalized here (not read off the parent doc) because
-      // Firestore security rules' get() calls don't see sibling writes
-      // within the same batch — the parent wouldn't exist yet from the
-      // rules engine's perspective when this write is evaluated.
-      batch.set(codeRef, {
-        code: String(Math.floor(1000 + Math.random() * 9000)),
-        clientId: user.uid,
+        packageNote: `${selectedVehicle?.name} · ${vehicle.toUpperCase()}`,
       });
-      await batch.commit();
 
       // Navigate immediately rather than waiting on matching — the track
       // page already subscribes to this document with onSnapshot and shows
       // a "Matching nearest available rider..." state until one is
       // assigned, so there's nothing to gain by blocking here.
-      router.push(`/track/${docRef.id}`);
+      router.push(`/track/${deliveryId}`);
 
       // Fire-and-forget: matching runs server-side now (Wave 2). If it
       // fails or finds nobody, the delivery just stays "pending" — it'll
       // get picked up the moment a rider nearby comes online (see
       // matchNearestDelivery in src/lib/dispatch.ts).
-      matchNearestRider(docRef.id).catch((err) => {
+      matchNearestRider(deliveryId).catch((err) => {
         console.error("Rider matching failed:", err);
       });
     } catch (err: unknown) {
@@ -264,7 +250,7 @@ function SendForm() {
           disabled={requesting}
           className="w-full rounded-xl bg-accent text-ink font-semibold py-4 hover:bg-accent-soft transition-colors cursor-pointer disabled:opacity-80 disabled:cursor-wait"
         >
-          {requesting ? "Saving delivery to Firebase…" : `Request rider · ${vehicles.find((v) => v.key === vehicle)?.fare}`}
+          {requesting ? "Finding nearby rider…" : `Request rider · ${vehicles.find((v) => v.key === vehicle)?.fare}`}
         </button>
       </form>
     </div>

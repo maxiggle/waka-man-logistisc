@@ -7,9 +7,11 @@ import { collection, query, where, getDocs, orderBy } from "firebase/firestore";
 import { db, isFirebaseConfigured } from "@/lib/firebase";
 import { useAuth } from "@/context/AuthContext";
 import type { DeliveryItem, DeliveryStatus } from "@/lib/schemas";
+import { formatQuote } from "@/lib/money";
 
 const STATUS_META: Record<DeliveryStatus, { label: string; cls: string }> = {
   pending: { label: "Pending rider", cls: "bg-primary/10 text-primary" },
+  offered: { label: "Offer sent", cls: "bg-primary/10 text-primary" },
   assigned: { label: "Rider assigned", cls: "bg-amber-100 text-amber-700" },
   picked_up: { label: "Picked up", cls: "bg-amber-100 text-amber-700" },
   in_transit: { label: "In transit", cls: "bg-accent/15 text-accent" },
@@ -262,7 +264,7 @@ export default function DashboardPage() {
                     </div>
 
                     <div className="text-right shrink-0">
-                      <p className="text-sm font-bold text-primary tabular-nums">{d.fare || "₦1,500"}</p>
+                      <p className="text-sm font-bold text-primary tabular-nums">{formatQuote(d.quotedAmountKobo)}</p>
                     </div>
 
                     <svg className="hidden sm:block h-4 w-4 shrink-0 text-ink/20 transition-transform group-hover:translate-x-0.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2.5}>

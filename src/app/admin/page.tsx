@@ -7,9 +7,11 @@ import { collection, getDocs, query, orderBy, limit } from "firebase/firestore";
 import { db, isFirebaseConfigured } from "@/lib/firebase";
 import { useAuth } from "@/context/AuthContext";
 import type { DeliveryItem, DeliveryStatus } from "@/lib/schemas";
+import { formatQuote } from "@/lib/money";
 
 const STATUS_META: Record<DeliveryStatus, { label: string; cls: string }> = {
   pending: { label: "Pending rider", cls: "bg-primary-light/20 text-primary-light" },
+  offered: { label: "Offer sent", cls: "bg-primary-light/20 text-primary-light" },
   assigned: { label: "Awaiting pickup", cls: "bg-amber-400/15 text-amber-400" },
   picked_up: { label: "Picked up", cls: "bg-amber-400/15 text-amber-400" },
   in_transit: { label: "In transit", cls: "bg-accent/15 text-accent" },
@@ -498,7 +500,7 @@ export default function AdminPage() {
                                   {meta.label}
                                 </span>
                               </td>
-                              <td className="py-3 pr-5 text-right text-white/70 tabular-nums">{d.fare || "₦1,500"}</td>
+                              <td className="py-3 pr-5 text-right text-white/70 tabular-nums">{formatQuote(d.quotedAmountKobo)}</td>
                             </tr>
                           );
                         })}

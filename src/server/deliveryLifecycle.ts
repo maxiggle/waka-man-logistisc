@@ -125,13 +125,24 @@ export async function completeDelivery(
         return { ok: false, status: 409, error: `Can't complete a delivery in status ${currentStatus}.` };
       }
 
+      // Payment is checked on its own, against the delivery's own state —
+      // not inferred from the code document existing. Those are two
+      // different claims, and conflating them made the code doc's existence
+      // the entire payment gate: anything that could create it could take a
+      // delivery for free. firestore.rules now denies client writes there,
+      // but a lifecycle rule this important shouldn't rest on a rules file
+      // staying correct, so it's asserted here too.
+      if (delivery.paymentStatus !== "paid") {
+        return { ok: false, status: 409, error: "This delivery hasn't been paid for yet." };
+      }
+
       const storedCode = codeSnap.exists ? (codeSnap.data()?.code as string | undefined) : undefined;
       if (!storedCode) {
-        // Distinct from a wrong guess. Since W5-T2, this doc is created only
-        // by applySuccessfulPayment (src/server/payments.ts) once a payment
-        // clears — its absence means the client hasn't paid yet, not that
-        // the booking broke.
-        return { ok: false, status: 409, error: "This delivery hasn't been paid for yet." };
+        // Paid, but no code — applySuccessfulPayment writes both in one
+        // transaction, so this is a real inconsistency rather than the
+        // ordinary unpaid state, and shouldn't be reported as "not paid".
+        console.error(`Delivery ${deliveryId} is paid but has no confirmation code.`);
+        return { ok: false, status: 409, error: "This delivery's confirmation code is missing. Contact support." };
       }
       if (!enteredCode || enteredCode !== storedCode) {
         return { ok: false, status: 400, error: "That code doesn't match. Ask the recipient to confirm it." };

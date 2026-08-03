@@ -77,21 +77,26 @@ service cloud.firestore {
 
     // --- deliveries/{deliveryId} ---
     //
-    // A client may create their own delivery, unassigned and pending. Every
-    // status transition and assignment write after that — claim, status
-    // advance, release, complete — is server-only (src/server/dispatch.ts,
-    // src/server/deliveryLifecycle.ts), so client-side update is fully
-    // denied here regardless of caller.
+    // Read-only to every client. Creation moved server-side (W5-T4,
+    // src/server/deliveries.ts via POST /api/deliveries) because the fare
+    // has to be computed and frozen onto the document by something the
+    // customer doesn't control; validating that through rules alone isn't
+    // possible. Every write after creation — claim, status advance,
+    // release, complete, payment — was already server-only
+    // (src/server/dispatch.ts, src/server/deliveryLifecycle.ts,
+    // src/server/payments.ts). The Admin SDK bypasses these rules entirely,
+    // so denying all writes here costs the server nothing.
     match /deliveries/{deliveryId} {
+      // The third arm covers a rider currently holding a live offer — they
+      // are neither the client nor the assigned rider yet. The 'offeredTo'
+      // in resource.data guard is required, not defensive noise: accessing
+      // a missing field in a rules expression is an evaluation error, and
+      // deliveries created before this change have no offeredTo field.
       allow read: if isSignedIn() &&
-        (resource.data.clientId == request.auth.uid || resource.data.riderId == request.auth.uid || isAdmin());
+        (resource.data.clientId == request.auth.uid || resource.data.riderId == request.auth.uid || isAdmin()
+          || ('offeredTo' in resource.data && request.auth.uid in resource.data.offeredTo));
 
-      allow create: if isSignedIn() &&
-        request.resource.data.clientId == request.auth.uid &&
-        request.resource.data.riderId == null &&
-        request.resource.data.status == 'pending';
-
-      allow update, delete: if false;
+      allow create, update, delete: if false;
 
       // The confirmation code: readable only by the owning client, never by
       // the assigned rider (see src/server/deliveryLifecycle.ts — completeDelivery
@@ -99,25 +104,41 @@ service cloud.firestore {
       // recursive `{document=**}` rule on the parent leaks this to the
       // rider too — it must be named explicitly like this.
       //
-      // clientId is stored on this document itself, not read off the
-      // parent via get() — a get() call inside a rule does not see sibling
-      // writes in the same batch, and this doc is created in the same
-      // batch as the parent delivery (src/app/send/page.tsx), so the
-      // parent wouldn't exist yet from the rules engine's perspective.
+      // clientId is stored on this document itself rather than read off the
+      // parent via get(), so the read rule stays a single-document check.
+      //
+      // WRITES ARE FULLY DENIED, and that is load-bearing. This document
+      // existing is what unlocks handover: completeDelivery treats its
+      // absence as "not paid for yet". An earlier version of this rule let
+      // a client create it (booking used to write the code in a batch with
+      // the delivery, before W5-T2 moved it behind payment) — which meant a
+      // customer could write their own code from the browser, read it back,
+      // tell the rider, and take the delivery without paying. Only
+      // applySuccessfulPayment (src/server/payments.ts) creates this, on
+      // the Admin SDK, after Paystack confirms the charge cleared.
       match /private/{docId} {
         allow read: if isSignedIn() && resource.data.clientId == request.auth.uid;
-        allow create: if isSignedIn() && request.resource.data.clientId == request.auth.uid;
-        allow update, delete: if false;
+        allow create, update, delete: if false;
+      }
+
+      // Payment attempts (src/server/payments.ts) are server-only in both
+      // directions. Nothing in the UI needs them: the customer's payment
+      // state is on the delivery itself, and these carry Paystack
+      // references that should not be enumerable by a browser.
+      match /paymentAttempts/{reference} {
+        allow read, write: if false;
       }
     }
 
     // --- riderAvailability/{uid} ---
     //
-    // A rider may write only their own presence doc. Nobody reads this
-    // collection from the client — Wave 3 removed the only client reader;
-    // matching now runs exclusively through src/server/dispatch.ts.
+    // A rider may read and write only their own presence doc. Matching still
+    // runs exclusively through src/server/dispatch.ts (Wave 3) — the one
+    // client read is W4-T4's startup reconciliation, a rider checking
+    // whether their own presence survived the app being closed. No one else
+    // may read any rider's presence, and no rider may read another's.
     match /riderAvailability/{uid} {
-      allow read: if false;
+      allow read: if isSignedIn() && request.auth.uid == uid;
       allow write: if isSignedIn() && request.auth.uid == uid &&
         request.resource.data.riderId == uid &&
         request.resource.data.status in ['online', 'busy'];

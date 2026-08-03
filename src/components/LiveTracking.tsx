@@ -1,11 +1,12 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import Link from "next/link";
 import dynamic from "next/dynamic";
 import { doc, onSnapshot } from "firebase/firestore";
-import { db } from "@/lib/firebase";
-import { coordsOf, type DeliveryItem, type LatLng } from "@/lib/schemas";
+import { auth, db } from "@/lib/firebase";
+import { coordsOf, PAYABLE_DELIVERY_STATUSES, type DeliveryItem, type DeliveryStatus, type LatLng } from "@/lib/schemas";
+import { formatQuote } from "@/lib/money";
 import { subscribeToPosition } from "@/lib/tracking";
 import { hasMapbox } from "@/lib/mapbox";
 import { FALLBACK_SERVICE_AREA } from "@/lib/dispatchConfig";
@@ -15,20 +16,35 @@ import type { RiderPosition } from "@/lib/native/rider-location";
 // mapbox-gl touches window at import — load it client-side only.
 const LiveMap = dynamic(() => import("@/components/LiveMap"), { ssr: false });
 
-const STAGES = [
-  { key: "assigned", label: "Confirmed" },
-  { key: "picked_up", label: "Picked up" },
-  { key: "in_transit", label: "In transit" },
-  { key: "arrived", label: "Arrived" },
-  { key: "delivered", label: "Delivered" },
-] as const;
+/**
+ * Stepper stages, each covering one or more delivery statuses.
+ *
+ * The mapping is one-to-many because "Requested" spans both `pending` (no
+ * offer out yet) and `offered` (out to riders, nobody has accepted). Keying
+ * stages directly to statuses meant every status without its own stage fell
+ * to index -1 and rendered the whole stepper unlit — so a delivery actively
+ * being broadcast to riders looked identical to one where nothing was
+ * happening. `cancelled` is deliberately absent: -1 there is correct, since
+ * a cancelled delivery has no progress to show.
+ */
+const STAGES: { key: string; label: string; statuses: DeliveryStatus[] }[] = [
+  { key: "requested", label: "Requested", statuses: ["pending", "offered"] },
+  { key: "assigned", label: "Confirmed", statuses: ["assigned"] },
+  { key: "picked_up", label: "Picked up", statuses: ["picked_up"] },
+  { key: "in_transit", label: "In transit", statuses: ["in_transit"] },
+  { key: "arrived", label: "Arrived", statuses: ["arrived"] },
+  { key: "delivered", label: "Delivered", statuses: ["delivered"] },
+];
 
 export default function LiveTracking({ delivery }: { delivery: DeliveryItem }) {
   const [rated, setRated] = useState(0);
   const [livePos, setLivePos] = useState<RiderPosition | null>(null);
   const [code, setCode] = useState<string | null>(null);
   const [codeError, setCodeError] = useState(false);
+  const [codeDocExists, setCodeDocExists] = useState(false);
   const [fallbackCenter, setFallbackCenter] = useState<LatLng>(FALLBACK_SERVICE_AREA);
+  const [paying, setPaying] = useState(false);
+  const [payError, setPayError] = useState("");
   const live = livePos !== null;
 
   // Real rider positions, when a rider is broadcasting for this delivery.
@@ -51,16 +67,17 @@ export default function LiveTracking({ delivery }: { delivery: DeliveryItem }) {
   // The confirmation code lives outside the top-level delivery document
   // (deliveries/{id}/private/code) so the assigned rider's own query never
   // receives it — this is the client/recipient's own view, so subscribing
-  // to it here is the legitimate read. An error callback matters here more
-  // than most onSnapshot calls in this app: once rules restrict this path
-  // to the owning client, anyone else hitting this page gets a permission
-  // error that would otherwise be an unhandled console error with the UI
-  // silently stuck on placeholder dots forever.
+  // to it here is the legitimate read. Since W5-T2 this doc doesn't exist
+  // until a payment is verified server-side (src/server/payments.ts), so
+  // "missing" and "permission denied" are two different, non-error states
+  // that must not render the same way: missing means "not paid yet", denied
+  // means this viewer shouldn't be looking at this delivery at all.
   useEffect(() => {
     if (!db) return;
     return onSnapshot(
       doc(db, "deliveries", delivery.id, "private", "code"),
       (snap) => {
+        setCodeDocExists(snap.exists());
         const value = snap.data()?.code;
         setCode(typeof value === "string" ? value : null);
         setCodeError(false);
@@ -72,10 +89,56 @@ export default function LiveTracking({ delivery }: { delivery: DeliveryItem }) {
     );
   }, [delivery.id]);
 
+  const isPayable = PAYABLE_DELIVERY_STATUSES.includes(delivery.status) && delivery.paymentStatus !== "paid";
+
+  // Pays for the delivery via Paystack Inline, then triggers the
+  // client-side verify shortcut — the confirmation code itself is never
+  // learned from this call. It arrives through the onSnapshot above once
+  // the server verifies the payment and creates the code doc.
+  const handlePay = useCallback(async () => {
+    if (!auth?.currentUser) {
+      setPayError("Please sign in again to pay.");
+      return;
+    }
+    setPaying(true);
+    setPayError("");
+    try {
+      const idToken = await auth.currentUser.getIdToken();
+      const initRes = await fetch(`/api/deliveries/${delivery.id}/payment/initialize`, {
+        method: "POST",
+        headers: { Authorization: `Bearer ${idToken}` },
+      });
+      const initData = await initRes.json().catch(() => null);
+      if (!initRes.ok) {
+        setPayError(initData?.error || "Could not start payment.");
+        setPaying(false);
+        return;
+      }
+
+      const { default: PaystackPop } = await import("@paystack/inline-js");
+      const popup = new PaystackPop();
+      const verify = () => {
+        fetch(`/api/deliveries/${delivery.id}/payment/verify`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json", Authorization: `Bearer ${idToken}` },
+          body: JSON.stringify({ reference: initData.reference }),
+        }).catch((err) => console.error("Payment verify failed:", err));
+        setPaying(false);
+      };
+      // resumeTransaction(accessCode), not newTransaction({ amount }) — the
+      // amount was fixed server-side at initialize and must stay that way.
+      popup.resumeTransaction(initData.accessCode, { onSuccess: verify, onCancel: verify });
+    } catch (err) {
+      console.error("Payment failed to start:", err);
+      setPayError("Something went wrong starting payment.");
+      setPaying(false);
+    }
+  }, [delivery.id]);
+
   // Stage comes from the delivery's real status — the rider drives these
   // transitions through /api/deliveries/[id]/status. -1 means "pending", i.e.
   // not yet assigned, so nothing on the stepper is lit.
-  const stageIndex = STAGES.findIndex((s) => s.key === delivery.status);
+  const stageIndex = STAGES.findIndex((s) => s.statuses.includes(delivery.status));
   const delivered = delivery.status === "delivered";
   const pickupCoords = coordsOf(delivery.pickup);
   const dropoffCoords = coordsOf(delivery.dropoff);
@@ -183,7 +246,7 @@ export default function LiveTracking({ delivery }: { delivery: DeliveryItem }) {
                 <p className="text-xs text-ink/45">Drop-off · {delivery.packageNote || "Package"}</p>
               </div>
             </div>
-            <p className="font-bold text-primary">{delivery.fare || "₦1,500"}</p>
+            <p className="font-bold text-primary">{formatQuote(delivery.quotedAmountKobo)}</p>
           </div>
         </div>
 
@@ -212,19 +275,48 @@ export default function LiveTracking({ delivery }: { delivery: DeliveryItem }) {
               </p>
             )}
           </div>
+        ) : codeError ? (
+          <div className="rounded-3xl bg-white border border-ink/10 p-6">
+            <p className="text-xs font-bold tracking-[0.2em] uppercase text-ink/40">Confirmation code</p>
+            <p className="mt-1 text-sm text-ink/55">You don&apos;t have permission to view this delivery&apos;s code.</p>
+          </div>
+        ) : !codeDocExists ? (
+          // Only once the delivery is actually payable. This card used to
+          // render for any unpaid delivery, so a freshly booked one with no
+          // rider yet showed "Pay now so your confirmation code is ready"
+          // directly above "Payment isn't available for this delivery yet" —
+          // inviting and refusing payment two lines apart. Nothing is shown
+          // before then: the fare is already on the delivery card above, and
+          // there is no action for the customer to take until a rider
+          // accepts.
+          isPayable && (
+            <div className="rounded-3xl bg-white border border-ink/10 p-6">
+              <p className="text-xs font-bold tracking-[0.2em] uppercase text-ink/40">Payment</p>
+              <p className="mt-1 text-sm text-ink/55 max-w-[34ch]">
+                {delivery.status === "arrived"
+                  ? "The rider is waiting — pay now to get your confirmation code."
+                  : "Pay now so your confirmation code is ready when the rider arrives."}
+              </p>
+              {payError && <p className="mt-3 text-sm text-red-600">{payError}</p>}
+              <button
+                type="button"
+                onClick={handlePay}
+                disabled={paying}
+                className="mt-4 w-full rounded-full bg-accent text-ink font-semibold px-6 py-3.5 hover:bg-accent-soft transition-colors cursor-pointer disabled:opacity-60"
+              >
+                {paying ? "Opening payment…" : `Pay ${formatQuote(delivery.quotedAmountKobo)}`}
+              </button>
+            </div>
+          )
         ) : (
           <div className="rounded-3xl bg-white border border-ink/10 p-6 flex items-center justify-between">
             <div>
               <p className="text-xs font-bold tracking-[0.2em] uppercase text-ink/40">Confirmation code</p>
               <p className="mt-1 text-sm text-ink/55 max-w-[26ch]">
-                {codeError
-                  ? "You don't have permission to view this delivery's code."
-                  : "Give this to the rider at the door to confirm delivery."}
+                Give this to the rider at the door to confirm delivery.
               </p>
             </div>
-            {!codeError && (
-              <p className="font-display text-3xl font-extrabold tracking-[0.2em] text-primary tabular-nums">{code ?? "····"}</p>
-            )}
+            <p className="font-display text-3xl font-extrabold tracking-[0.2em] text-primary tabular-nums">{code ?? "····"}</p>
           </div>
         )}
 

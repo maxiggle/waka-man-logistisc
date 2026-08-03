@@ -12,6 +12,7 @@
     "@capacitor-firebase/authentication": "^8.3.0",
     "@capacitor/android": "^8.4.2",
     "@capacitor/core": "^8.4.2",
+    "@paystack/inline-js": "^2.24.0",
     "firebase": "^12.16.0",
     "firebase-admin": "^14.2.0",
     "geofire-common": "^6.0.0",

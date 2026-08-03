@@ -23,6 +23,7 @@ export const clientSchema = z.object({
 
 export const deliveryStatusSchema = z.enum([
   "pending",
+  "offered",
   "assigned",
   "picked_up",
   "in_transit",
@@ -43,9 +44,17 @@ export const deliveryStatusSchema = z.enum([
  * Once a rider has physically picked up the package, release is no longer
  * offered: there's no sane automated way to return a package to the pool
  * that a rider is physically holding.
+ *
+ * "offered" has no legal targets here on purpose. This map governs
+ * rider-driven transitions through /api/deliveries/[id]/status; offering,
+ * accepting and rejecting are separate operations with their own endpoints
+ * and their own authorization (src/server/dispatch.ts,
+ * src/server/deliveryOffers.ts). Routing them through the generic status
+ * endpoint would let a rider assign themselves work by writing a status.
  */
 export const DELIVERY_STATUS_TRANSITIONS: Record<z.infer<typeof deliveryStatusSchema>, z.infer<typeof deliveryStatusSchema>[]> = {
   pending: [],
+  offered: [],
   assigned: ["picked_up", "pending"],
   picked_up: ["in_transit"],
   in_transit: ["arrived"],
@@ -53,6 +62,19 @@ export const DELIVERY_STATUS_TRANSITIONS: Record<z.infer<typeof deliveryStatusSc
   delivered: [],
   cancelled: [],
 };
+
+/**
+ * Statuses a delivery can be paid for in. Not "pending"/"offered" (no rider
+ * committed yet), not "delivered"/"cancelled" (nothing left to unlock).
+ * Shared so payment initialize (src/server/payments.ts) can't drift from
+ * whatever this list is meant to represent.
+ */
+export const PAYABLE_DELIVERY_STATUSES: z.infer<typeof deliveryStatusSchema>[] = [
+  "assigned",
+  "picked_up",
+  "in_transit",
+  "arrived",
+];
 
 export interface DeliveryRiderInfo {
   name: string;
@@ -70,7 +92,19 @@ export interface DeliveryItem {
   pickup: string | { address: string; lat?: number; lng?: number };
   dropoff: string | { address: string; lat?: number; lng?: number };
   packageNote?: string;
-  fare?: string;
+  /**
+   * The fare, in integer kobo, frozen at booking by src/server/deliveries.ts.
+   * Server-written and never updated — this is what the customer was quoted
+   * and the only figure payment verification will accept. Every price the
+   * UI shows derives from this field, formatted at render (formatNaira);
+   * there is deliberately no pre-formatted `fare` string on the document,
+   * because a display string the client wrote can disagree with the amount
+   * the server actually charges.
+   *
+   * Optional only for deliveries created before this field existed; they
+   * cannot be paid for (src/server/payments.ts fails them closed).
+   */
+  quotedAmountKobo?: number;
   // Confirmation code deliberately lives at deliveries/{id}/private/code,
   // not here — this document is what the assigned rider's own query reads,
   // and the code must not be in their memory before the recipient tells
@@ -80,6 +114,33 @@ export interface DeliveryItem {
   createdAt?: number;
   assignedAt?: number | null;
   deliveredAt?: number | null;
+  // Offer round state (status "offered" only) — see src/server/dispatch.ts
+  // and src/server/deliveryOffers.ts. Cleared whenever the delivery leaves
+  // "offered" (accepted, all rejected, or the offer lapses).
+  offeredTo?: string[];
+  offeredAt?: number | null;
+  offerExpiresAt?: number | null;
+  // Uids who have rejected this delivery. Persists across offer rounds so a
+  // rider who rejects is never offered the same delivery again.
+  rejectedBy?: string[];
+  // Payment state (W5-T2) — server-written only, via src/server/payments.ts.
+  // Absent paymentStatus is equivalent to "unpaid"; the confirmation code
+  // doc (deliveries/{id}/private/code) does not exist until paymentStatus
+  // becomes "paid", so there's nothing gating it to leak.
+  /** Server-written only. Absent is equivalent to "unpaid". */
+  paymentStatus?: "processing" | "paid" | "failed";
+  /**
+   * The reference that actually settled. Issued references live in
+   * deliveries/{id}/paymentAttempts/{reference} instead of a single field
+   * here — a customer may have several in flight, and any of them settling
+   * is a real payment we have to honour.
+   */
+  paidReference?: string;
+  paidAt?: number | null;
+  /** Integer kobo actually received, for reconciliation against the quote. */
+  paidAmountKobo?: number | null;
+  /** "card", "bank_transfer", etc. — whatever Paystack reports. */
+  paymentChannel?: string | null;
 }
 
 export type LatLng = { lat: number; lng: number };
@@ -130,6 +191,36 @@ export const serviceLevelSchema = z.enum(["standard", "express", "bulk"]);
 type AssertExactUnion<A, B> = [A] extends [B] ? ([B] extends [A] ? true : false) : false;
 const _serviceLevelMatchesDispatchConfig: AssertExactUnion<z.infer<typeof serviceLevelSchema>, ServiceLevel> = true;
 void _serviceLevelMatchesDispatchConfig;
+
+/** A resolved address with coordinates, as booking submits it. */
+const endpointSchema = z.object({
+  address: z.string().min(1).max(300),
+  lat: z.number().min(-90).max(90),
+  lng: z.number().min(-180).max(180),
+});
+
+/**
+ * The complete set of fields a customer may supply when booking. Everything
+ * else on a delivery — clientId, status, riderId, quotedAmountKobo, all
+ * timestamps — is derived server-side by src/server/deliveries.ts, so this
+ * schema is also the authorization boundary: a field absent here cannot be
+ * set by a caller at all. `.strict()` makes that enforcement rather than
+ * convention, rejecting a body that tries to smuggle in extras.
+ *
+ * Note `vehicle` is validated here. Under the old client-write path the
+ * rules could not check it, so an unrecognized tier produced a delivery that
+ * was silently unpriceable and unmatchable; now it's a 400 at the door.
+ */
+export const deliveryCreateSchema = z
+  .object({
+    pickup: endpointSchema,
+    dropoff: endpointSchema,
+    vehicle: serviceLevelSchema,
+    packageNote: z.string().max(500).optional(),
+  })
+  .strict();
+
+export type DeliveryCreateInput = z.infer<typeof deliveryCreateSchema>;
 
 export const ratingSchema = z.object({
   deliveryId: z.string(),

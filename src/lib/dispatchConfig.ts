@@ -6,19 +6,46 @@
 export const AVAILABILITY_PUBLISH_INTERVAL_MS = 8000;
 
 /**
- * A riderAvailability doc older than this is treated as stale and excluded
- * from matching, even if never explicitly cleared (e.g. rider force-quit).
+ * How long a rider's presence survives without a fresh publish. Reaching this
+ * means the record is deleted and the rider is offline (see sweepStaleAvailability
+ * in src/server/dispatch.ts).
  *
- * INVARIANT: AVAILABILITY_PUBLISH_INTERVAL_MS must stay well below this TTL,
- * or live riders age out of the pool between publishes.
+ * 30 minutes is a deliberate grace period, not the normal operating cadence:
+ * with the foreground service running, a backgrounded rider still publishes every
+ * AVAILABILITY_PUBLISH_INTERVAL_MS. This covers doze, a tunnel, an aggressive OEM
+ * battery manager, or the app being killed — none of which should instantly
+ * evict a rider who is still working.
+ *
+ * INVARIANT: AVAILABILITY_PUBLISH_INTERVAL_MS must stay well below this.
  */
-export const AVAILABILITY_TTL_MS = 60_000;
+export const AVAILABILITY_TTL_MS = 1_800_000; // 30 minutes
+
+/**
+ * How recent a rider's position must be for matching to consider them.
+ *
+ * Set equal to AVAILABILITY_TTL_MS on purpose: a present rider is an offerable
+ * rider. The trade-off is that an offer can be built on a position up to 30
+ * minutes old, which broadcast offers soften — every nearby rider is offered it
+ * and can decline, and the pickup address is visible before accepting.
+ *
+ * Tighten this (e.g. 300_000) if stale-position offers become a problem in
+ * practice. MUST NOT exceed AVAILABILITY_TTL_MS — a rider who cannot be matched
+ * but still occupies a presence record is worse than being offline.
+ */
+export const AVAILABILITY_MATCH_FRESHNESS_MS = AVAILABILITY_TTL_MS;
 
 /** Widest radius matching will search before giving up. */
 export const MAX_SEARCH_RADIUS_KM = 50;
 
-/** Stop retrying a match after this many failed claim attempts. */
-export const MAX_CLAIM_ATTEMPTS = 10;
+/** How long a rider has to accept before an offer lapses and the delivery returns to the pool. */
+export const OFFER_TTL_MS = 30_000;
+
+/**
+ * Cap on how many riders a single delivery is offered to at once. Broadcast
+ * fills faster than sequential offers, but every recipient is a document read
+ * and a wasted tap for everyone who loses the race.
+ */
+export const MAX_OFFER_RECIPIENTS = 10;
 
 /**
  * Per geohash-bound cap on the availability query in findEligibleRiders.
@@ -44,6 +71,15 @@ export const MAX_VEHICLE_LOOKUP_BATCH = 100;
  * arbitrary document order, and gives the cap a defensible meaning.
  */
 export const MAX_PENDING_DELIVERIES_SCAN = 200;
+
+/**
+ * Cap on how many deliveries a single rider-side sweep will try to offer
+ * before giving up. Each attempt is a full broadcastOffer — ~9 geohash range
+ * queries plus a batched users lookup — so this is a hard bound on the work
+ * one "go online" tap can trigger. Replaces MAX_CLAIM_ATTEMPTS, which capped
+ * the same loop back when each attempt was a single two-document transaction.
+ */
+export const MAX_OFFER_ATTEMPTS = 5;
 
 /**
  * Per-uid rate limit for POST /api/dispatch/match-delivery — a cheap call
@@ -130,3 +166,26 @@ export const VEHICLE_ELIGIBILITY: Record<RiderVehicle, ServiceLevel[]> = Object.
  * see serviceAreas/{id} and src/lib/serviceAreas.ts.
  */
 export const FALLBACK_SERVICE_AREA = { name: "Port Harcourt", lat: 4.8156, lng: 7.0498 } as const;
+
+/**
+ * The server-authoritative price of each service tier, in kobo (1 naira =
+ * 100 kobo — Paystack's smallest unit). Read in exactly one place:
+ * quoteKobo() in src/server/fare.ts, called once per booking by
+ * src/server/deliveries.ts, which stamps the result onto the delivery as
+ * `quotedAmountKobo`. Payment reads that stored quote, never this table —
+ * so editing these numbers changes what *new* bookings cost and leaves
+ * in-flight ones alone, rather than rejecting the payments of customers
+ * who were quoted the old price.
+ *
+ * Flat per-tier pricing is a deliberate minimal scope (W5-T1) — no
+ * distance/time component yet, though quoteKobo() already receives both
+ * endpoints so adding one is a change to that function alone. Note that
+ * src/app/send/page.tsx reads this table directly to preview tier prices
+ * before a delivery exists; that shortcut is only valid while fares are
+ * flat, and a distance component means the preview needs a server quote.
+ */
+export const SERVICE_LEVEL_FARE_KOBO: Record<ServiceLevel, number> = {
+  express: 150_000,
+  standard: 90_000,
+  bulk: 240_000,
+};

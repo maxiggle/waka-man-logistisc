@@ -127,10 +127,11 @@ export async function completeDelivery(
 
       const storedCode = codeSnap.exists ? (codeSnap.data()?.code as string | undefined) : undefined;
       if (!storedCode) {
-        // Distinct from a wrong guess — the code doc itself never landed
-        // (e.g. the booking write partially failed), which isn't the
-        // recipient's fault and shouldn't read like it is.
-        return { ok: false, status: 409, error: "This delivery has no confirmation code on record." };
+        // Distinct from a wrong guess. Since W5-T2, this doc is created only
+        // by applySuccessfulPayment (src/server/payments.ts) once a payment
+        // clears — its absence means the client hasn't paid yet, not that
+        // the booking broke.
+        return { ok: false, status: 409, error: "This delivery hasn't been paid for yet." };
       }
       if (!enteredCode || enteredCode !== storedCode) {
         return { ok: false, status: 400, error: "That code doesn't match. Ask the recipient to confirm it." };

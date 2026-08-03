@@ -42,9 +42,9 @@ export async function POST(request: NextRequest) {
       return NextResponse.json({ error: "Delivery has an invalid service level" }, { status: 422 });
     }
 
-    const rider = await matchNearestRider(deliveryId, [pickup.lat, pickup.lng], parsedLevel.data);
+    const offer = await matchNearestRider(deliveryId, [pickup.lat, pickup.lng], parsedLevel.data);
 
-    return NextResponse.json({ rider });
+    return NextResponse.json({ offer });
   } catch (err) {
     // Covers a missing FIREBASE_SERVICE_ACCOUNT_B64 (getAdminDb/getUidFromRequest
     // throw rather than fail silently) and any other unexpected failure — the

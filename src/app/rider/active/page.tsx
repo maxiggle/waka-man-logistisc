@@ -3,21 +3,33 @@
 import { Suspense, useCallback, useEffect, useRef, useState } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
-import { collection, onSnapshot, query, where } from "firebase/firestore";
+import { collection, doc, getDoc, onSnapshot, query, where } from "firebase/firestore";
 import { db, isFirebaseConfigured } from "@/lib/firebase";
 import { useAuth } from "@/context/AuthContext";
 import { createLocationTracker, type LocationTracker, type RiderPosition } from "@/lib/location";
 import { publishPosition, clearPosition, isLiveBackendConfigured } from "@/lib/tracking";
 import { publishRiderAvailability, clearRiderAvailability } from "@/lib/riderAvailability";
 import { matchNearestDelivery } from "@/lib/dispatch";
-import { AVAILABILITY_PUBLISH_INTERVAL_MS } from "@/lib/dispatchConfig";
+import { AVAILABILITY_PUBLISH_INTERVAL_MS, AVAILABILITY_TTL_MS } from "@/lib/dispatchConfig";
 import { advanceDeliveryStatus, completeDelivery, type NonTerminalStatus } from "@/lib/deliveryLifecycle";
-import type { DeliveryStatus } from "@/lib/schemas";
+import { acceptDeliveryOffer, rejectDeliveryOffer } from "@/lib/deliveryOffers";
+import type { DeliveryItem, DeliveryStatus } from "@/lib/schemas";
+import { formatQuote } from "@/lib/money";
 
 /** Label passed to the native tracker while browsing for jobs (no delivery yet). */
 const IDLE_TRACKING_LABEL = "idle-availability";
 
 type Mode = "checking" | "offline" | "searching" | "assigned";
+
+type DeliveryOffer = {
+  id: string;
+  pickup: string;
+  dropoff: string;
+  quotedAmountKobo?: number;
+  vehicle?: string;
+  offeredAt: number;
+  offerExpiresAt: number;
+};
 
 function RiderActive() {
   const router = useRouter();
@@ -26,6 +38,7 @@ function RiderActive() {
   const [mode, setMode] = useState<Mode>(() => (isFirebaseConfigured ? "checking" : "offline"));
   const [deliveryId, setDeliveryId] = useState<string | null>(null);
   const [deliveryStatus, setDeliveryStatus] = useState<DeliveryStatus | null>(null);
+  const [paymentStatus, setPaymentStatus] = useState<DeliveryItem["paymentStatus"]>(undefined);
   const [trackingStatus, setTrackingStatus] = useState<"idle" | "starting" | "tracking" | "denied">("idle");
   const [lastFix, setLastFix] = useState<RiderPosition | null>(null);
   const [lastPublishedAt, setLastPublishedAt] = useState<number | null>(null);
@@ -34,17 +47,24 @@ function RiderActive() {
   const [lifecycleBusy, setLifecycleBusy] = useState(false);
   const [lifecycleError, setLifecycleError] = useState("");
   const [codeInput, setCodeInput] = useState("");
+  const [offers, setOffers] = useState<DeliveryOffer[]>([]);
+  const [offerBusyId, setOfferBusyId] = useState<string | null>(null);
+  const [offerMessages, setOfferMessages] = useState<Record<string, string>>({});
+  const [now, setNow] = useState(() => Date.now());
+  const [restoredOnline, setRestoredOnline] = useState(false);
 
   const trackerRef = useRef<LocationTracker | null>(null);
   const lastAvailabilityPublishAt = useRef(0);
   const swept = useRef(false);
-  // Tracks the current uid for the unmount-cleanup effect below, which must
-  // run only once (empty deps) but still needs the *latest* uid rather than
-  // whatever `user` was on first render (null, while auth is still resolving).
-  const uidRef = useRef<string | null>(null);
+  const restoreCheckedRef = useRef(false);
+  // Holds the rider's display name for the idle-tracking effect below without
+  // making that effect depend on userProfile — depending on it directly would
+  // restart the GPS tracker (and its permission prompt) on every profile
+  // refresh.
+  const displayNameRef = useRef<string>("Rider");
   useEffect(() => {
-    uidRef.current = user?.uid ?? null;
-  }, [user]);
+    displayNameRef.current = userProfile?.name || user?.displayName || "Rider";
+  }, [userProfile, user]);
 
   useEffect(() => {
     if (authLoading) return;
@@ -73,19 +93,131 @@ function RiderActive() {
       q,
       (snap) => {
         if (!snap.empty) {
+          const data = snap.docs[0].data();
           setDeliveryId(snap.docs[0].id);
-          setDeliveryStatus((snap.docs[0].data().status as DeliveryStatus) ?? null);
+          setDeliveryStatus((data.status as DeliveryStatus) ?? null);
+          setPaymentStatus(data.paymentStatus as DeliveryItem["paymentStatus"]);
           setMode("assigned");
         } else {
           setDeliveryId((prev) => (prev ? null : prev));
           setDeliveryStatus(null);
-          setMode((prev) => (prev === "assigned" ? "offline" : prev === "checking" ? "offline" : prev));
+          setPaymentStatus(undefined);
+          // A finished or released delivery returns the rider to searching, not offline —
+          // going online is an explicit choice that stays in force until they toggle it
+          // off. The server already keeps their availability "online" through completion
+          // (src/server/deliveryLifecycle.ts); dropping to "offline" here silently undid
+          // that and left them stale within AVAILABILITY_TTL_MS.
+          // "checking" -> "offline" is unchanged: that is first load with no active
+          // delivery, where the rider has not gone online yet.
+          setMode((prev) => (prev === "assigned" ? "searching" : prev === "checking" ? "offline" : prev));
         }
       },
       (err) => console.error("Failed to watch for assigned deliveries:", err),
     );
     return () => unsub();
   }, [user, authLoading]);
+
+  // Startup reconciliation: presence is durable now (see the unmount effect
+  // below and W4-T3), so on a fresh load — app reopened, or this page
+  // revisited after being killed — React state resets to "offline" while the
+  // riderAvailability document may still be there and still fresh. Without
+  // this the rider sees "Offline" while still being offered deliveries.
+  // Read once, directly; this is a one-time reconciliation, not live state —
+  // the idle-tracking effect below takes over publishing once mode flips to
+  // "searching".
+  useEffect(() => {
+    if (authLoading || !user || !isFirebaseConfigured || !db || restoreCheckedRef.current) return;
+    restoreCheckedRef.current = true;
+    const database = db;
+
+    (async () => {
+      try {
+        const snap = await getDoc(doc(database, "riderAvailability", user.uid));
+        if (!snap.exists()) return;
+        const updatedAt = snap.data().updatedAt;
+        if (typeof updatedAt !== "number" || Date.now() - updatedAt > AVAILABILITY_TTL_MS) return;
+
+        // A currently active delivery still wins — this only restores the
+        // "was online" session, never overrides "assigned".
+        swept.current = false;
+        setRestoredOnline(true);
+        setMode((prev) => (prev === "assigned" ? prev : "searching"));
+      } catch (err) {
+        console.error("Failed to restore rider presence on load:", err);
+      }
+    })();
+  }, [authLoading, user]);
+
+  // Live broadcast offers held by this rider. Separate from the query above:
+  // an offer is never assigned (riderId stays unset until accepted), so it
+  // would never appear in the riderId == uid query — this is the only way
+  // the rider finds out about it.
+  useEffect(() => {
+    if (!user || !isFirebaseConfigured || !db) return;
+    const q = query(
+      collection(db, "deliveries"),
+      where("status", "==", "offered"),
+      where("offeredTo", "array-contains", user.uid),
+    );
+    const unsub = onSnapshot(
+      q,
+      (snap) => {
+        const list: DeliveryOffer[] = snap.docs.map((docSnap) => {
+          const data = docSnap.data();
+          return {
+            id: docSnap.id,
+            pickup: typeof data.pickup === "string" ? data.pickup : data.pickup?.address || "Pickup address",
+            dropoff: typeof data.dropoff === "string" ? data.dropoff : data.dropoff?.address || "Drop-off address",
+            // The server-frozen quote, not a string the customer wrote —
+            // this is the number the rider decides to accept the job on.
+            quotedAmountKobo: typeof data.quotedAmountKobo === "number" ? data.quotedAmountKobo : undefined,
+            vehicle: typeof data.vehicle === "string" ? data.vehicle : undefined,
+            offeredAt: typeof data.offeredAt === "number" ? data.offeredAt : 0,
+            offerExpiresAt: typeof data.offerExpiresAt === "number" ? data.offerExpiresAt : 0,
+          };
+        });
+        list.sort((a, b) => b.offeredAt - a.offeredAt);
+        setOffers(list);
+      },
+      (err) => console.error("Failed to watch delivery offers:", err),
+    );
+    return () => unsub();
+  }, [user]);
+
+  // Ticks once a second while any offer is live, purely to redraw the
+  // countdown and drop cards locally the instant they hit zero — showing an
+  // Accept button that is guaranteed to 409 is worse than showing nothing.
+  useEffect(() => {
+    if (offers.length === 0) return;
+    const timer = setInterval(() => setNow(Date.now()), 1000);
+    return () => clearInterval(timer);
+  }, [offers.length]);
+
+  const liveOffers = offers.filter((o) => o.offerExpiresAt > now);
+
+  const handleAcceptOffer = useCallback(async (offerId: string) => {
+    setOfferBusyId(offerId);
+    setOfferMessages((m) => ({ ...m, [offerId]: "" }));
+    const result = await acceptDeliveryOffer(offerId);
+    setOfferBusyId(null);
+    if (!result.ok) {
+      // Losing a race is the expected outcome for most recipients of a
+      // broadcast offer — this must read as ordinary, not as a fault.
+      setOfferMessages((m) => ({ ...m, [offerId]: result.error }));
+      return;
+    }
+    // On success the assigned-delivery subscription above picks this up on
+    // its own and switches mode to "assigned" — nothing to do here.
+  }, []);
+
+  const handleRejectOffer = useCallback(async (offerId: string) => {
+    setOfferBusyId(offerId);
+    const result = await rejectDeliveryOffer(offerId);
+    setOfferBusyId(null);
+    if (!result.ok) setOfferMessages((m) => ({ ...m, [offerId]: result.error }));
+    // On success the offers subscription above naturally drops this card
+    // (this uid leaves offeredTo) — nothing to do here.
+  }, []);
 
   const stopTracker = useCallback(async () => {
     await trackerRef.current?.stop();
@@ -95,75 +227,98 @@ function RiderActive() {
 
   // Idle GPS loop while "searching": publishes availability so other clients'
   // matching can find this rider, and sweeps once for any job that was
-  // already waiting when we came online.
-  const goOnline = useCallback(async () => {
+  // already waiting. Mode-driven, mirroring the assigned-delivery tracker
+  // effect below, so re-entering "searching" after finishing or releasing a
+  // job (see the assignment-detection effect above) restarts publishing on
+  // its own — the rider does not have to tap "Go online" again.
+  useEffect(() => {
+    if (mode !== "searching" || !user) return;
+    let cancelled = false;
+    const uid = user.uid;
+
+    (async () => {
+      await trackerRef.current?.stop();
+      if (cancelled) return;
+      setTrackingStatus("starting");
+
+      try {
+        const tracker = createLocationTracker();
+        trackerRef.current = tracker;
+        const ok = await tracker.start(IDLE_TRACKING_LABEL, (pos) => {
+          setLastFix(pos);
+          if (pos.isMock) return; // never publish mock fixes as real availability
+
+          const now = Date.now();
+          if (now - lastAvailabilityPublishAt.current < AVAILABILITY_PUBLISH_INTERVAL_MS) return;
+          lastAvailabilityPublishAt.current = now;
+
+          publishRiderAvailability(
+            uid,
+            displayNameRef.current,
+            { lat: pos.lat, lng: pos.lng },
+            "online",
+          )
+            .then(() => {
+              // Publish succeeded — the rider is genuinely visible to
+              // dispatch now, independent of whether the sweep below finds
+              // them a job. No args: the server derives who's asking from
+              // the bearer token and reads position from the rider's own
+              // availability document — see src/server/dispatch.ts.
+              if (swept.current) return;
+              matchNearestDelivery()
+                .then(() => {
+                  swept.current = true;
+                })
+                .catch((err) => {
+                  // A failed sweep (rate-limited, transient network) must not
+                  // mark `swept` — leave it false so the next position tick
+                  // retries. Publishing already succeeded, so the rider IS
+                  // online; this isn't worth kicking them offline over, and
+                  // a client's own booking will still reach them either way.
+                  console.error("Rider sweep-match failed (will retry next tick):", err);
+                });
+            })
+            .catch((err) => {
+              // The UI must not keep saying "Searching" when the rider isn't
+              // actually visible to dispatch — surface the failure and drop
+              // them back out of searching rather than leaving a false
+              // impression that they're online.
+              console.error("Failed to publish rider availability:", err);
+              setError("You're not visible to dispatch right now — check your connection and go online again.");
+              setMode("offline");
+              void stopTracker();
+            });
+        });
+
+        if (cancelled) return;
+        setTrackingStatus(ok ? "tracking" : "denied");
+        if (!ok) setMode("offline");
+      } catch (err) {
+        console.error("Failed to start location tracker:", err);
+        if (cancelled) return;
+        setError("Couldn't start location tracking. Check permissions and try again.");
+        setTrackingStatus("idle");
+        setMode("offline");
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [mode, user, stopTracker]);
+
+  const goOnline = useCallback(() => {
     if (!user) return;
     setError("");
-    setTrackingStatus("starting");
+    setRestoredOnline(false);
     swept.current = false;
-
-    try {
-      const tracker = createLocationTracker();
-      trackerRef.current = tracker;
-      const ok = await tracker.start(IDLE_TRACKING_LABEL, (pos) => {
-        setLastFix(pos);
-        if (pos.isMock) return; // never publish mock fixes as real availability
-
-        const now = Date.now();
-        if (now - lastAvailabilityPublishAt.current < AVAILABILITY_PUBLISH_INTERVAL_MS) return;
-        lastAvailabilityPublishAt.current = now;
-
-        publishRiderAvailability(
-          user.uid,
-          userProfile?.name || user.displayName || "Rider",
-          { lat: pos.lat, lng: pos.lng },
-          "online",
-        )
-          .then(() => {
-            // Publish succeeded — the rider is genuinely visible to
-            // dispatch now, independent of whether the sweep below finds
-            // them a job. No args: the server derives who's asking from
-            // the bearer token and reads position from the rider's own
-            // availability document — see src/server/dispatch.ts.
-            if (swept.current) return;
-            matchNearestDelivery()
-              .then(() => {
-                swept.current = true;
-              })
-              .catch((err) => {
-                // A failed sweep (rate-limited, transient network) must not
-                // mark `swept` — leave it false so the next position tick
-                // retries. Publishing already succeeded, so the rider IS
-                // online; this isn't worth kicking them offline over, and
-                // a client's own booking will still reach them either way.
-                console.error("Rider sweep-match failed (will retry next tick):", err);
-              });
-          })
-          .catch((err) => {
-            // The UI must not keep saying "Searching" when the rider isn't
-            // actually visible to dispatch — surface the failure and drop
-            // them back out of searching rather than leaving a false
-            // impression that they're online.
-            console.error("Failed to publish rider availability:", err);
-            setError("You're not visible to dispatch right now — check your connection and go online again.");
-            setMode("offline");
-            void stopTracker();
-          });
-      });
-
-      setTrackingStatus(ok ? "tracking" : "denied");
-      setMode(ok ? "searching" : "offline");
-    } catch (err) {
-      console.error("Failed to start location tracker:", err);
-      setError("Couldn't start location tracking. Check permissions and try again.");
-      setTrackingStatus("idle");
-      setMode("offline");
-    }
-  }, [user, userProfile, stopTracker]);
+    setMode("searching");
+  }, [user]);
 
   const goOffline = useCallback(async () => {
     await stopTracker();
     if (user) await clearRiderAvailability(user.uid).catch(() => {});
+    setRestoredOnline(false);
     setMode("offline");
   }, [stopTracker, user]);
 
@@ -179,7 +334,7 @@ function RiderActive() {
       setLifecycleBusy(false);
       if (!result.ok) setLifecycleError(result.error);
       // On success the status-in-filter query above naturally reflects the
-      // new state (including dropping back to "offline" for a release) —
+      // new state (including returning to "searching" for a release) —
       // no manual reset needed here.
     },
     [deliveryId],
@@ -226,24 +381,28 @@ function RiderActive() {
   }, [mode, deliveryId]);
 
   // When a delivery finishes and we drop back out of "assigned", clear its
-  // live position and stop the tracker — goOnline() is a fresh user action.
+  // live position and mark the rider unswept so they sweep for waiting work
+  // again — going online stays in force, so the idle tracker (above) picks
+  // back up on its own when mode returns to "searching". The tracker itself
+  // is deliberately left running: tearing it down here would recreate the
+  // exact staleness window this behaviour exists to close.
   const prevMode = useRef<Mode>(mode);
   useEffect(() => {
     if (prevMode.current === "assigned" && mode !== "assigned") {
-      void stopTracker();
       if (deliveryId) clearPosition(deliveryId);
       setMockWarning(false);
+      swept.current = false;
     }
     prevMode.current = mode;
-  }, [mode, deliveryId, stopTracker]);
+  }, [mode, deliveryId]);
 
+  // Presence is durable — navigating away, or the app closing outright, must
+  // not end it. Only the explicit toggle (goOffline) or the server-side
+  // sweep (AVAILABILITY_TTL_MS) does that. The tracker still stops with the
+  // component; it just no longer takes the rider offline on the way out.
   useEffect(() => {
     return () => {
       void trackerRef.current?.stop();
-      // Read the ref, not `user` — `user` here is whatever it was on first
-      // render (null, while auth is still resolving), and that stale
-      // closure meant this cleanup never actually cleared availability.
-      if (uidRef.current) void clearRiderAvailability(uidRef.current).catch(() => {});
     };
   }, []);
 
@@ -315,6 +474,59 @@ function RiderActive() {
             <p className="mt-2 text-sm text-ink/60">
               Your location is being shared so nearby delivery requests can find you.
             </p>
+            {restoredOnline && (
+              <p className="mt-3 rounded-xl bg-primary/10 text-primary text-xs font-semibold px-3 py-2">
+                You&apos;re still online from before — we kept you visible to dispatch.
+              </p>
+            )}
+
+            {liveOffers.length > 0 && (
+              <div className="mt-6 space-y-4">
+                {liveOffers.map((offer) => {
+                  const secondsLeft = Math.max(0, Math.ceil((offer.offerExpiresAt - now) / 1000));
+                  const busy = offerBusyId === offer.id;
+                  const message = offerMessages[offer.id];
+                  return (
+                    <div key={offer.id} className="rounded-2xl bg-white border border-accent/40 p-5 space-y-3 shadow-sm">
+                      <div className="flex items-center justify-between">
+                        <span className="text-xs font-bold uppercase tracking-wider text-accent">New delivery offer</span>
+                        <span className="text-xs font-bold text-ink/50 tabular-nums">{secondsLeft}s</span>
+                      </div>
+                      <div className="text-sm text-ink/80 space-y-1">
+                        <p><span className="font-semibold">Pickup:</span> {offer.pickup}</p>
+                        <p><span className="font-semibold">Drop-off:</span> {offer.dropoff}</p>
+                      </div>
+                      <div className="flex items-center justify-between text-sm">
+                        <span className="font-semibold text-ink/50 uppercase tracking-wide text-xs">
+                          {offer.vehicle || "Standard"}
+                        </span>
+                        <span className="font-bold text-primary">{formatQuote(offer.quotedAmountKobo)}</span>
+                      </div>
+                      {message && <p className="text-xs text-ink/50">{message}</p>}
+                      <div className="flex gap-3">
+                        <button
+                          type="button"
+                          onClick={() => handleRejectOffer(offer.id)}
+                          disabled={busy}
+                          className="flex-1 rounded-full border border-ink/15 text-ink/70 font-semibold px-4 py-2.5 hover:bg-surface transition-colors cursor-pointer disabled:opacity-50"
+                        >
+                          Reject
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => handleAcceptOffer(offer.id)}
+                          disabled={busy}
+                          className="flex-1 rounded-full bg-accent text-ink font-semibold px-4 py-2.5 hover:bg-accent-soft transition-colors cursor-pointer disabled:opacity-50"
+                        >
+                          {busy ? "…" : "Accept"}
+                        </button>
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            )}
+
             <div className="mt-8 rounded-2xl bg-white border border-ink/10 p-6 space-y-4">
               <div className="flex items-center justify-between">
                 <span className="text-sm font-semibold text-ink/70">Status</span>
@@ -439,8 +651,17 @@ function RiderActive() {
                 </button>
               )}
 
-              {deliveryStatus === "arrived" && (
+              {deliveryStatus === "arrived" && paymentStatus !== "paid" && (
+                <p className="rounded-xl bg-amber-50 border border-amber-200 text-amber-800 text-sm font-semibold px-4 py-3 text-center">
+                  Awaiting payment — do not release the package.
+                </p>
+              )}
+
+              {deliveryStatus === "arrived" && paymentStatus === "paid" && (
                 <div className="space-y-3">
+                  <p className="rounded-xl bg-emerald-50 border border-emerald-200 text-emerald-700 text-sm font-semibold px-4 py-3 text-center">
+                    Paid — ask for the 4-digit code.
+                  </p>
                   <div>
                     <label htmlFor="deliveryCode" className="text-xs font-semibold text-ink/60">
                       Recipient&apos;s 4-digit code

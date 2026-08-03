@@ -4,7 +4,11 @@ export const runtime = "nodejs";
 import { NextResponse, type NextRequest } from "next/server";
 import { getUidFromRequest, getAdminDb } from "@/server/firebaseAdmin";
 import { matchNearestDelivery } from "@/server/dispatch";
-import { AVAILABILITY_TTL_MS, MATCH_DELIVERY_RATE_LIMIT, MATCH_DELIVERY_RATE_WINDOW_MS } from "@/lib/dispatchConfig";
+import {
+  AVAILABILITY_MATCH_FRESHNESS_MS,
+  MATCH_DELIVERY_RATE_LIMIT,
+  MATCH_DELIVERY_RATE_WINDOW_MS,
+} from "@/lib/dispatchConfig";
 
 // Best-effort, per-instance rate limiting: this Map lives in the function
 // instance's own memory, not a shared store, so it resets on cold start and
@@ -58,7 +62,8 @@ export async function POST(request: NextRequest) {
     // claim transaction would eventually reject a non-online rider anyway,
     // but only after a full pending-collection scan — check status and TTL
     // here instead, and short-circuit before that scan runs at all.
-    const isStale = typeof availability.updatedAt !== "number" || Date.now() - availability.updatedAt > AVAILABILITY_TTL_MS;
+    const isStale =
+      typeof availability.updatedAt !== "number" || Date.now() - availability.updatedAt > AVAILABILITY_MATCH_FRESHNESS_MS;
     if (availability.status !== "online" || isStale) {
       return NextResponse.json(
         { error: "You're not currently visible to dispatch — go online again to search for a delivery." },
@@ -66,7 +71,7 @@ export async function POST(request: NextRequest) {
       );
     }
 
-    const delivery = await matchNearestDelivery({
+    const offer = await matchNearestDelivery({
       id: uid,
       name: userData.name ?? availability.name ?? "Rider",
       lat: availability.lat,
@@ -74,7 +79,7 @@ export async function POST(request: NextRequest) {
       vehicle: typeof userData.vehicle === "string" ? userData.vehicle : undefined,
     });
 
-    return NextResponse.json({ delivery });
+    return NextResponse.json({ offer });
   } catch (err) {
     // Covers a missing FIREBASE_SERVICE_ACCOUNT_B64 (getAdminDb/getUidFromRequest
     // throw rather than fail silently) and any other unexpected failure — the

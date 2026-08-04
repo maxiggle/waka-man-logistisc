@@ -21,6 +21,7 @@ import { Capacitor } from "@capacitor/core";
 import { FirebaseAuthentication } from "@capacitor-firebase/authentication";
 import { auth, googleProvider, db, isFirebaseConfigured } from "@/lib/firebase";
 import { isEmailInvited } from "@/lib/admin";
+import { isEmailSuperAdminInvited } from "@/lib/superadmin";
 import { markReturningDevice } from "@/lib/session";
 
 // The native Google Sign-In sheet rejects when the user dismisses it. On Android
@@ -34,7 +35,43 @@ function normalizeSignInError(err: unknown): Error {
   return new Error(raw || "Google sign-in failed.");
 }
 
-export type UserRole = "client" | "rider" | "admin";
+export type UserRole = "client" | "rider" | "admin" | "superadmin";
+
+/**
+ * Resolves which invite-gated role (if any) this email currently holds.
+ * Checked superadmin-first: if an email somehow has both invites, superadmin
+ * wins — see the KNOWN LIMITATION note in src/lib/superadmin.ts for why a
+ * user can't hold both roles at once under the current single-role schema.
+ */
+async function resolveInvitedRole(email: string | null): Promise<"superadmin" | "admin" | null> {
+  if (!email) return null;
+  if (await isEmailSuperAdminInvited(email)) return "superadmin";
+  if (await isEmailInvited(email)) return "admin";
+  return null;
+}
+
+/**
+ * Two-way role reconciliation (WM-105) — the actual fix, not just the
+ * promote half that shipped originally. `existing.role` was previously only
+ * ever moved *toward* an invited role, never away from one: an admin or
+ * superadmin whose invite had been deleted kept that role forever, because
+ * `if (invitedRole && …)` simply does nothing when `invitedRole` is null.
+ * Deleting an adminInvites/superadminInvites doc looked like it revoked
+ * access; it didn't touch the user's stored role at all.
+ *
+ * The rule now runs in both directions: an invite promotes, and the absence
+ * of one demotes — but only for a role that is itself invite-gated
+ * (admin/superadmin). "rider" and "client" are never touched here; there's
+ * no invite mechanism for them to be reconciled against.
+ *
+ * Demotes to "client", not the requested role at signup time — a demoted
+ * admin was never a rider, so there's no other role to fall back to.
+ */
+function reconcileRole(currentRole: UserRole, invitedRole: "superadmin" | "admin" | null): UserRole {
+  if (invitedRole) return invitedRole;
+  if (currentRole === "admin" || currentRole === "superadmin") return "client";
+  return currentRole;
+}
 
 export type UserProfile = {
   uid: string;
@@ -85,12 +122,13 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     }
 
     const existing = snap.data() as UserProfile;
-    const invited = firebaseUser.email ? await isEmailInvited(firebaseUser.email) : false;
-    if (invited && existing.role !== "admin") {
-      const promoted: UserProfile = { ...existing, role: "admin" };
-      await setDoc(userRef, { role: "admin" }, { merge: true });
-      setUserProfile(promoted);
-      return promoted;
+    const invitedRole = await resolveInvitedRole(firebaseUser.email);
+    const nextRole = reconcileRole(existing.role, invitedRole);
+    if (nextRole !== existing.role) {
+      const reconciled: UserProfile = { ...existing, role: nextRole };
+      await setDoc(userRef, { role: nextRole }, { merge: true });
+      setUserProfile(reconciled);
+      return reconciled;
     }
 
     setUserProfile(existing);
@@ -98,10 +136,13 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   };
 
   // Single source of truth for reading/creating a user's Firestore profile.
-  // Admin status is invite-gated (see src/lib/admin.ts): a matching
-  // `adminInvites/{email}` doc promotes the user to role "admin" on this
+  // Admin/superadmin status is invite-gated (src/lib/admin.ts,
+  // src/lib/superadmin.ts): a matching `adminInvites/{email}` or
+  // `superadminInvites/{email}` doc promotes the user to that role on this
   // sign-in, overriding whatever role the caller asked for — client code can
-  // request "client" or "rider", never "admin" directly.
+  // request "client" or "rider", never "admin"/"superadmin" directly. The
+  // reverse also holds now (WM-105): if the caller's stored role is
+  // invite-gated and no matching invite exists, this demotes them.
   const syncUserProfile = async (
     firebaseUser: User,
     requestedRole: UserRole = "client",
@@ -109,7 +150,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     if (!db) return null;
     const userRef = doc(db, "users", firebaseUser.uid);
     const snap = await getDoc(userRef);
-    const invited = firebaseUser.email ? await isEmailInvited(firebaseUser.email) : false;
+    const invitedRole = await resolveInvitedRole(firebaseUser.email);
 
     if (!snap.exists()) {
       const newProfile: UserProfile = {
@@ -117,7 +158,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         name: firebaseUser.displayName || "User",
         email: firebaseUser.email || "",
         photoURL: firebaseUser.photoURL || undefined,
-        role: invited ? "admin" : requestedRole,
+        role: invitedRole || requestedRole,
         createdAt: Date.now(),
       };
       await setDoc(userRef, newProfile);
@@ -126,11 +167,12 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     }
 
     const existing = snap.data() as UserProfile;
-    if (invited && existing.role !== "admin") {
-      const promoted: UserProfile = { ...existing, role: "admin" };
-      await setDoc(userRef, { role: "admin" }, { merge: true });
-      setUserProfile(promoted);
-      return promoted;
+    const nextRole = reconcileRole(existing.role, invitedRole);
+    if (nextRole !== existing.role) {
+      const reconciled: UserProfile = { ...existing, role: nextRole };
+      await setDoc(userRef, { role: nextRole }, { merge: true });
+      setUserProfile(reconciled);
+      return reconciled;
     }
     setUserProfile(existing);
     return existing;

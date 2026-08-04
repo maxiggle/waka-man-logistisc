@@ -8,6 +8,7 @@ import { db, isFirebaseConfigured } from "@/lib/firebase";
 import { useAuth } from "@/context/AuthContext";
 import type { DeliveryItem, DeliveryStatus } from "@/lib/schemas";
 import { formatQuote } from "@/lib/money";
+import { hasAdminAccess } from "@/lib/roles";
 
 const STATUS_META: Record<DeliveryStatus, { label: string; cls: string }> = {
   pending: { label: "Pending rider", cls: "bg-primary/10 text-primary" },
@@ -65,7 +66,7 @@ export default function DashboardPage() {
     (async () => {
       const profile = await refreshUserProfile();
       if (cancelled) return;
-      if (profile?.role === "admin") {
+      if (hasAdminAccess(profile?.role)) {
         router.replace("/admin");
         return;
       }

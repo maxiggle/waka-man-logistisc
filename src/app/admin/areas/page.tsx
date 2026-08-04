@@ -15,6 +15,7 @@ import {
 } from "@/lib/serviceAreas";
 import AddressAutocomplete from "@/components/AddressAutocomplete";
 import type { AddressSuggestion } from "@/lib/geocode";
+import { hasAdminAccess } from "@/lib/roles";
 
 export default function AdminAreasPage() {
   const router = useRouter();
@@ -46,7 +47,7 @@ export default function AdminAreasPage() {
     (async () => {
       const profile = await refreshUserProfile();
       if (cancelled) return;
-      const admin = profile?.role === "admin";
+      const admin = hasAdminAccess(profile?.role);
       setIsAdmin(admin);
       setCheckingAdmin(false);
       if (!admin) router.replace("/dashboard");

@@ -215,9 +215,27 @@ export const SERVICE_LEVEL_PRICING: Record<
   ServiceLevel,
   { baseKobo: number; perKmKobo: number; minimumKobo: number }
 > = {
-  express: { baseKobo: 50_000, perKmKobo: 12_500, minimumKobo: 70_000 },
-  standard: { baseKobo: 30_000, perKmKobo: 7_500, minimumKobo: 45_000 },
-  bulk: { baseKobo: 80_000, perKmKobo: 20_000, minimumKobo: 110_000 },
+  // Calibrated against a real route and a real cost input rather than a
+  // guess: Choba → Peter Odili is 7.59km of road (Mapbox Directions), and
+  // the owner puts that trip at ₦3,500–4,000 with petrol at ₦1,350/litre.
+  // These land it at ₦3,700.
+  //
+  // The split between base and per-km is not arbitrary. The base covers
+  // what a rider spends regardless of trip length — riding to the pickup
+  // unpaid, waiting, handover — and the per-km covers fuel and time on the
+  // paid leg. At ₦1,350/litre and roughly 35km/litre in city traffic,
+  // one-way fuel is about ₦39/km, and closer to ₦77/km once the rider's
+  // return or repositioning leg is counted; ₦350/km leaves real headroom
+  // above that for time, maintenance and margin as petrol moves.
+  //
+  // The minimum is deliberately a hair above one litre of petrol — the
+  // shortest job worth accepting should still clear a tank top-up.
+  express: { baseKobo: 100_000, perKmKobo: 35_000, minimumKobo: 150_000 },
+  // Not bookable — no available transport mode claims either tier (see
+  // TRANSPORT_MODES). Kept in proportion to express so that enabling a mode
+  // doesn't silently expose a tier priced from a stale guess.
+  standard: { baseKobo: 80_000, perKmKobo: 28_000, minimumKobo: 120_000 },
+  bulk: { baseKobo: 160_000, perKmKobo: 56_000, minimumKobo: 240_000 },
 };
 
 /** Seed only (WM-101 Phase 2) — see SERVICE_LEVEL_PRICING. Charged amounts round up to the nearest rounding step. */

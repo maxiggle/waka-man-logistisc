@@ -184,6 +184,23 @@ export const VEHICLE_ELIGIBILITY: Record<RiderVehicle, ServiceLevel[]> = Object.
 ) as Record<RiderVehicle, ServiceLevel[]>;
 
 /**
+ * How long the tracking page keeps saying it's searching before telling the
+ * customer plainly that nobody was found.
+ *
+ * This is a UI honesty bound, not a server deadline: the delivery stays
+ * pending and remains matchable the moment a rider comes online, because
+ * matchNearestDelivery() sweeps pending work from the rider's side. What it
+ * bounds is how long the interface is allowed to imply something is
+ * happening when it may not be — previously "Matching nearest available
+ * rider…" ran forever with no way to tell a busy night from a dead queue.
+ *
+ * Retrying afterwards is deliberately the customer's decision, not an
+ * automatic loop: an unattended retry every N seconds spends dispatch work
+ * on someone who may have walked away.
+ */
+export const RIDER_SEARCH_TIMEOUT_MS = 120_000;
+
+/**
  * Last-resort centre when no service area can be read from Firestore (empty
  * collection, offline, permission error). Admin-managed areas override this —
  * see serviceAreas/{id} and src/lib/serviceAreas.ts.

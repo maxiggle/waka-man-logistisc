@@ -5,16 +5,33 @@ import Link from "next/link";
 import dynamic from "next/dynamic";
 import { doc, onSnapshot } from "firebase/firestore";
 import { auth, db } from "@/lib/firebase";
-import { coordsOf, PAYABLE_DELIVERY_STATUSES, type DeliveryItem, type DeliveryStatus, type LatLng } from "@/lib/schemas";
+import {
+  coordsOf,
+  CANCELLABLE_DELIVERY_STATUSES,
+  PAYABLE_DELIVERY_STATUSES,
+  type DeliveryItem,
+  type DeliveryStatus,
+  type LatLng,
+} from "@/lib/schemas";
 import { formatQuote } from "@/lib/money";
 import { subscribeToPosition } from "@/lib/tracking";
 import { hasMapbox } from "@/lib/mapbox";
-import { FALLBACK_SERVICE_AREA } from "@/lib/dispatchConfig";
+import { matchNearestRider } from "@/lib/dispatch";
+import { cancelDelivery } from "@/lib/deliveryLifecycle";
+import { FALLBACK_SERVICE_AREA, RIDER_SEARCH_TIMEOUT_MS } from "@/lib/dispatchConfig";
 import { getDefaultServiceArea } from "@/lib/serviceAreas";
 import type { RiderPosition } from "@/lib/native/rider-location";
 
 // mapbox-gl touches window at import — load it client-side only.
 const LiveMap = dynamic(() => import("@/components/LiveMap"), { ssr: false });
+
+/** Remaining search time as "1:23 left". */
+function formatCountdown(ms: number): string {
+  const total = Math.ceil(ms / 1000);
+  const minutes = Math.floor(total / 60);
+  const seconds = total % 60;
+  return `${minutes}:${String(seconds).padStart(2, "0")} left`;
+}
 
 /**
  * Stepper stages, each covering one or more delivery statuses.
@@ -46,6 +63,58 @@ export default function LiveTracking({ delivery }: { delivery: DeliveryItem }) {
   const [paying, setPaying] = useState(false);
   const [payError, setPayError] = useState("");
   const live = livePos !== null;
+
+  // Search state. Both clocks are lazy initialisers rather than values read
+  // during render — Date.now() is impure, and calling it in a render body
+  // makes the countdown depend on when React happened to re-render.
+  const [retryAt, setRetryAt] = useState<number | null>(null);
+  const [now, setNow] = useState(() => Date.now());
+  const [retrying, setRetrying] = useState(false);
+  const [cancelling, setCancelling] = useState(false);
+  const [searchError, setSearchError] = useState("");
+
+  const searching = delivery.status === "pending" || delivery.status === "offered";
+  // When the current search round began: the booking time, or the last
+  // manual retry. Derived rather than stored, so nothing has to reset it.
+  const searchStartedAt = retryAt ?? delivery.createdAt ?? now;
+  const msLeft = Math.max(0, searchStartedAt + RIDER_SEARCH_TIMEOUT_MS - now);
+  const searchTimedOut = searching && msLeft === 0;
+  const canCancel = CANCELLABLE_DELIVERY_STATUSES.includes(delivery.status);
+
+  // Ticks only while a countdown is actually on screen — not for the whole
+  // life of the delivery.
+  useEffect(() => {
+    if (!searching || msLeft === 0) return;
+    const timer = setInterval(() => setNow(Date.now()), 1000);
+    return () => clearInterval(timer);
+  }, [searching, msLeft]);
+
+  const handleRetrySearch = useCallback(async () => {
+    setRetrying(true);
+    setSearchError("");
+    try {
+      await matchNearestRider(delivery.id);
+      // Restart the countdown whether or not this round found anyone —
+      // matching is asynchronous, and an offer may land moments later.
+      setRetryAt(Date.now());
+      setNow(Date.now());
+    } catch (err) {
+      console.error("Retrying rider search failed:", err);
+      setSearchError(err instanceof Error ? err.message : "Could not search again.");
+    } finally {
+      setRetrying(false);
+    }
+  }, [delivery.id]);
+
+  const handleCancel = useCallback(async () => {
+    setCancelling(true);
+    setSearchError("");
+    const result = await cancelDelivery(delivery.id);
+    // On success the onSnapshot in the parent re-renders this into the
+    // cancelled state, so there is nothing to set here.
+    if (!result.ok) setSearchError(result.error);
+    setCancelling(false);
+  }, [delivery.id]);
 
   // Real rider positions, when a rider is broadcasting for this delivery.
   useEffect(() => {
@@ -188,7 +257,9 @@ export default function LiveTracking({ delivery }: { delivery: DeliveryItem }) {
             </div>
             <div className="flex-1">
               <p className="font-bold">
-                {delivery.rider
+                {delivery.status === "cancelled"
+                  ? "Order cancelled"
+                  : delivery.rider
                   ? live
                     ? `${delivery.rider.name} is on the way — live GPS`
                     : delivered
@@ -198,12 +269,20 @@ export default function LiveTracking({ delivery }: { delivery: DeliveryItem }) {
                     : delivery.status === "in_transit"
                     ? `${delivery.rider.name} is on the way`
                     : `${delivery.rider.name} is heading to pickup`
+                  : searchTimedOut
+                  ? "No riders available right now"
                   : "Matching nearest available rider..."}
               </p>
               <p className="text-sm text-white/50">
-                {delivery.rider
+                {delivery.status === "cancelled"
+                  ? "You cancelled this order. Nothing was charged."
+                  : delivery.rider
                   ? `${delivery.rider.vehicle || "Motorbike"} · ${delivery.rider.plate || "WAKA-MAN"} · ★ ${(delivery.rider.rating || 5.0).toFixed(1)}`
-                  : "Dispatching order to nearby fleet"}
+                  : searchTimedOut
+                  ? "Nobody nearby has picked this up. You can search again or cancel."
+                  : // Counting down rather than an open-ended spinner: the
+                    // customer can tell a busy few minutes from a dead queue.
+                    `Dispatching order to nearby fleet · ${formatCountdown(msLeft)}`}
               </p>
             </div>
           </div>
@@ -217,6 +296,37 @@ export default function LiveTracking({ delivery }: { delivery: DeliveryItem }) {
               </div>
             ))}
           </div>
+          {/* Search actions. Retrying is deliberately a button and never a
+              timer: an unattended loop spends dispatch work on a customer
+              who may have closed the tab. Cancel is offered for the whole
+              search, not only after it times out — someone who booked the
+              wrong address shouldn't have to wait two minutes to undo it. */}
+          {(canCancel || searchTimedOut) && (
+            <div className="mt-5 flex flex-wrap gap-2.5">
+              {searchTimedOut && (
+                <button
+                  type="button"
+                  onClick={handleRetrySearch}
+                  disabled={retrying || cancelling}
+                  className="rounded-full bg-accent px-5 py-2.5 text-sm font-semibold text-ink hover:bg-accent-soft transition-colors cursor-pointer disabled:opacity-60"
+                >
+                  {retrying ? "Searching…" : "Search again"}
+                </button>
+              )}
+              {canCancel && (
+                <button
+                  type="button"
+                  onClick={handleCancel}
+                  disabled={cancelling || retrying}
+                  className="rounded-full border border-white/20 px-5 py-2.5 text-sm font-semibold text-white/80 hover:bg-white/10 transition-colors cursor-pointer disabled:opacity-60"
+                >
+                  {cancelling ? "Cancelling…" : "Cancel order"}
+                </button>
+              )}
+            </div>
+          )}
+          {searchError && <p className="mt-3 text-sm text-red-300">{searchError}</p>}
+
           <div className="mt-2 flex justify-between text-[10px] text-white/40">
             {STAGES.map((s, i) => (
               <span key={s.key} className={i === stageIndex ? "text-accent font-bold" : ""}>{s.label}</span>

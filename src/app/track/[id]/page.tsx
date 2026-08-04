@@ -6,6 +6,7 @@ import { useRouter } from "next/navigation";
 import { doc, onSnapshot } from "firebase/firestore";
 import { db, isFirebaseConfigured } from "@/lib/firebase";
 import { useAuth } from "@/context/AuthContext";
+import { homeRouteForRole } from "@/lib/roles";
 import type { DeliveryItem } from "@/lib/schemas";
 import LiveTracking from "@/components/LiveTracking";
 
@@ -16,7 +17,7 @@ export default function TrackDeliveryPage({
 }) {
   const { id } = use(params);
   const router = useRouter();
-  const { user, loading: authLoading } = useAuth();
+  const { user, userProfile, loading: authLoading } = useAuth();
   const [delivery, setDelivery] = useState<DeliveryItem | null | undefined>(undefined);
 
   useEffect(() => {
@@ -70,9 +71,18 @@ export default function TrackDeliveryPage({
             <img src="/brand/mark.png" alt="" className="h-8 w-auto" />
             The Waka Man
           </Link>
-          <span className="text-sm font-semibold text-ink/50">
-            Tracking <span className="text-primary">{id.toUpperCase()}</span>
-          </span>
+          {/* A way out, rather than the tracking id. The id is already on
+              the delivery card below, and repeating it in the one corner
+              that could hold navigation left anyone who opened this page
+              directly with nowhere to go. Destination follows the viewer's
+              role — riders reach this page too, and their home isn't the
+              client dashboard. */}
+          <Link
+            href={homeRouteForRole(userProfile?.role)}
+            className="text-sm font-semibold text-ink/50 hover:text-primary transition-colors"
+          >
+            ← {userProfile?.role === "rider" ? "Back to jobs" : "Back to dashboard"}
+          </Link>
         </nav>
       </header>
 

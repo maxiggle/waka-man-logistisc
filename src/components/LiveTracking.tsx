@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useState } from "react";
 import Link from "next/link";
+import { useRouter } from "next/navigation";
 import dynamic from "next/dynamic";
 import { doc, onSnapshot } from "firebase/firestore";
 import { auth, db } from "@/lib/firebase";
@@ -54,6 +55,7 @@ const STAGES: { key: string; label: string; statuses: DeliveryStatus[] }[] = [
 ];
 
 export default function LiveTracking({ delivery }: { delivery: DeliveryItem }) {
+  const router = useRouter();
   const [rated, setRated] = useState(0);
   const [livePos, setLivePos] = useState<RiderPosition | null>(null);
   const [code, setCode] = useState<string | null>(null);
@@ -110,11 +112,19 @@ export default function LiveTracking({ delivery }: { delivery: DeliveryItem }) {
     setCancelling(true);
     setSearchError("");
     const result = await cancelDelivery(delivery.id);
-    // On success the onSnapshot in the parent re-renders this into the
-    // cancelled state, so there is nothing to set here.
-    if (!result.ok) setSearchError(result.error);
-    setCancelling(false);
-  }, [delivery.id]);
+    if (!result.ok) {
+      setSearchError(result.error);
+      setCancelling(false);
+      return;
+    }
+    // Straight back to the dashboard rather than leaving them looking at a
+    // cancelled order with nothing to do. Always the client dashboard: the
+    // server only lets the booking client cancel, so whoever got here is
+    // one. Deliberately not clearing `cancelling` first — the button should
+    // stay disabled through the navigation rather than flicker back to
+    // "Cancel order" on an order that no longer exists.
+    router.push("/dashboard");
+  }, [delivery.id, router]);
 
   // Real rider positions, when a rider is broadcasting for this delivery.
   useEffect(() => {

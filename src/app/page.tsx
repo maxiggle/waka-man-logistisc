@@ -7,13 +7,7 @@ import { Capacitor } from "@capacitor/core";
 import FeaturesCarousel from "@/components/FeaturesCarousel";
 import { useAuth } from "@/context/AuthContext";
 import { isReturningDevice } from "@/lib/session";
-import type { UserRole } from "@/context/AuthContext";
-
-function homeRouteForRole(role: UserRole | undefined): string {
-  if (role === "admin") return "/admin";
-  if (role === "rider") return "/rider/active";
-  return "/dashboard";
-}
+import { homeRouteForRole } from "@/lib/roles";
 
 const features = [
   {

@@ -7,27 +7,27 @@ import { isFirebaseConfigured } from "@/lib/firebase";
 import { useAuth } from "@/context/AuthContext";
 import { matchNearestRider } from "@/lib/dispatch";
 import { createDelivery } from "@/lib/deliveries";
+import { fetchQuote, type Quote } from "@/lib/quotes";
 import { isGeocodingConfigured, type AddressSuggestion } from "@/lib/geocode";
-import { BOOKABLE_SERVICE_LEVELS, SERVICE_LEVEL_FARE_KOBO, type ServiceLevel } from "@/lib/dispatchConfig";
+import { BOOKABLE_SERVICE_LEVELS, type ServiceLevel } from "@/lib/dispatchConfig";
 import { currentPositionIfPermitted, getDefaultServiceArea } from "@/lib/serviceAreas";
 import { formatNaira } from "@/lib/money";
 import type { LatLng } from "@/lib/schemas";
 import AddressAutocomplete from "@/components/AddressAutocomplete";
 
+/** How long to let typing/tier-switching settle before spending a Directions call on it. */
+const QUOTE_DEBOUNCE_MS = 400;
+
 // Keyed by ServiceLevel (not a plain array) so tsc fails the moment this
 // tier list and dispatchConfig's ServiceLevel drift apart in either direction.
 //
-// These prices are a *preview*, shown before a delivery exists to be quoted.
-// They are only trustworthy while fares are flat per tier, where reading the
-// shared table client-side gives exactly what the server will compute. The
-// price that binds is the one the server stamps at booking and returns —
-// this is what the customer chooses between, not what they are charged.
-// Adding a distance component means this preview has to come from a server
-// quote endpoint instead; the table read below silently becomes wrong.
-const VEHICLE_TIERS: Record<ServiceLevel, { name: string; meta: string; fare: string; hot: boolean }> = {
-  express: { name: "Express", meta: "Motorbike · pickup in ~4 min", fare: formatNaira(SERVICE_LEVEL_FARE_KOBO.express), hot: true },
-  standard: { name: "Standard", meta: "Scooter · pickup in ~9 min", fare: formatNaira(SERVICE_LEVEL_FARE_KOBO.standard), hot: false },
-  bulk: { name: "Bulk", meta: "Car · pickup in ~14 min", fare: formatNaira(SERVICE_LEVEL_FARE_KOBO.bulk), hot: false },
+// No price lives here any more (WM-101 Phase 1) — fares are distance-based,
+// so there is no meaningful price before both addresses resolve. The form
+// shows one once /api/quotes returns, for whichever tier is selected.
+const VEHICLE_TIERS: Record<ServiceLevel, { name: string; meta: string; hot: boolean }> = {
+  express: { name: "Express", meta: "Motorbike · pickup in ~4 min", hot: true },
+  standard: { name: "Standard", meta: "Scooter · pickup in ~9 min", hot: false },
+  bulk: { name: "Bulk", meta: "Car · pickup in ~14 min", hot: false },
 };
 const TIER_ORDER: ServiceLevel[] = ["express", "standard", "bulk"];
 // Only tiers an available transport mode can actually fulfil — booking one
@@ -40,7 +40,7 @@ const vehicles = TIER_ORDER.filter((key) => BOOKABLE_SERVICE_LEVELS.includes(key
 function SendForm() {
   const router = useRouter();
   const searchParams = useSearchParams();
-  const { user, userProfile, loading } = useAuth();
+  const { user, loading } = useAuth();
 
   const [pickup, setPickup] = useState(searchParams.get("pickup") || "");
   const [dropoff, setDropoff] = useState(searchParams.get("dropoff") || "");
@@ -52,6 +52,10 @@ function SendForm() {
   const [requesting, setRequesting] = useState(false);
   const [error, setError] = useState("");
   const [biasPoint, setBiasPoint] = useState<LatLng | undefined>(undefined);
+  const [serviceArea, setServiceArea] = useState<LatLng | undefined>(undefined);
+  const [quote, setQuote] = useState<Quote | null>(null);
+  const [quoting, setQuoting] = useState(false);
+  const [quoteError, setQuoteError] = useState("");
 
   // Search bias: the customer's own position if already permitted (never
   // prompted for), otherwise the admin-managed default service area. Never
@@ -73,6 +77,20 @@ function SendForm() {
     };
   }, []);
 
+  // The actual service area centre (WM-102), resolved separately from
+  // biasPoint above: biasPoint may be the customer's own live position, but
+  // the out-of-area geocoding filter must always anchor to the service area
+  // itself, not to wherever the customer happens to be standing.
+  useEffect(() => {
+    let cancelled = false;
+    getDefaultServiceArea().then((area) => {
+      if (!cancelled) setServiceArea({ lat: area.lat, lng: area.lng });
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
   useEffect(() => {
     if (!loading && !user) {
       const p = encodeURIComponent(pickup);
@@ -80,6 +98,46 @@ function SendForm() {
       router.push(`/login?redirect=/send?pickup=${p}&dropoff=${d}`);
     }
   }, [loading, user, router, pickup, dropoff]);
+
+  // Prices the trip once both addresses are resolved, debounced so retyping
+  // an address or flipping between tiers doesn't spend a Directions call
+  // per keystroke — Mapbox's Directions free tier is 100k/month
+  // (WM-101). Any change to pickup/dropoff/vehicle invalidates the quote
+  // immediately (there is no meaningful price for the old selection any
+  // more) and the debounced fetch below produces a fresh one.
+  useEffect(() => {
+    setQuote(null);
+    setQuoteError("");
+
+    if (!user || !pickupResolved || pickupResolved.address !== pickup || !dropoffResolved || dropoffResolved.address !== dropoff) {
+      setQuoting(false);
+      return;
+    }
+
+    let cancelled = false;
+    setQuoting(true);
+    const timer = setTimeout(() => {
+      fetchQuote({
+        pickup: { address: pickupResolved.address, lat: pickupResolved.lat, lng: pickupResolved.lng },
+        dropoff: { address: dropoffResolved.address, lat: dropoffResolved.lat, lng: dropoffResolved.lng },
+        vehicle,
+      })
+        .then((q) => {
+          if (!cancelled) setQuote(q);
+        })
+        .catch((err: unknown) => {
+          if (!cancelled) setQuoteError(err instanceof Error ? err.message : "Could not price this trip.");
+        })
+        .finally(() => {
+          if (!cancelled) setQuoting(false);
+        });
+    }, QUOTE_DEBOUNCE_MS);
+
+    return () => {
+      cancelled = true;
+      clearTimeout(timer);
+    };
+  }, [user, pickup, dropoff, pickupResolved, dropoffResolved, vehicle]);
 
   const submit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -113,6 +171,11 @@ function SendForm() {
       return;
     }
 
+    if (!quote) {
+      setError(quoting ? "Still pricing this trip — try again in a moment." : "Get a quote before booking.");
+      return;
+    }
+
     try {
       setRequesting(true);
       setError("");
@@ -120,14 +183,12 @@ function SendForm() {
       const selectedVehicle = vehicles.find((v) => v.key === vehicle);
 
       // The server writes the delivery (W5-T4) — the browser can't create
-      // one any more, and no longer sends a price. It submits the trip and
-      // gets back the fare the server froze onto the document. Identity,
-      // status, and quotedAmountKobo are all decided there; sending them
-      // from here would only be a suggestion the server ignores.
+      // one any more. Booking sends only the quoteId from the /api/quotes
+      // call above (WM-101 Phase 1): pickup, dropoff, vehicle and the price
+      // all come back off that frozen quote, never re-priced here. Sending
+      // them again would only be a suggestion the server ignores.
       const { deliveryId } = await createDelivery({
-        pickup: { address: pickupResolved.address, lat: pickupResolved.lat, lng: pickupResolved.lng },
-        dropoff: { address: dropoffResolved.address, lat: dropoffResolved.lat, lng: dropoffResolved.lng },
-        vehicle,
+        quoteId: quote.quoteId,
         packageNote: `${selectedVehicle?.name} · ${vehicle.toUpperCase()}`,
       });
 
@@ -193,6 +254,7 @@ function SendForm() {
           }}
           resolved={pickupResolved}
           proximity={biasPoint}
+          serviceArea={serviceArea}
         />
         <AddressAutocomplete
           id="dropoff"
@@ -208,6 +270,7 @@ function SendForm() {
           }}
           resolved={dropoffResolved}
           proximity={biasPoint}
+          serviceArea={serviceArea}
         />
 
         <fieldset className="pt-2">
@@ -239,18 +302,39 @@ function SendForm() {
                     <span className="block text-xs text-ink/50">{v.meta}</span>
                   </span>
                 </span>
-                <span className="font-bold text-primary">{v.fare}</span>
+                {/* Only the selected tier has a live price — switching tiers requotes
+                    rather than showing every tier's price at once, so this is the one
+                    Directions call in flight, not three. */}
+                <span className="font-bold text-primary">
+                  {v.key !== vehicle
+                    ? "—"
+                    : quoting
+                    ? "Pricing…"
+                    : quote
+                    ? formatNaira(quote.amountKobo)
+                    : "—"}
+                </span>
               </label>
             ))}
           </div>
         </fieldset>
 
+        {quoteError && (
+          <p className="rounded-xl bg-red-50 border border-red-200 text-red-700 text-sm px-3 py-2">{quoteError}</p>
+        )}
+
         <button
           type="submit"
-          disabled={requesting}
+          disabled={requesting || quoting || !quote}
           className="w-full rounded-xl bg-accent text-ink font-semibold py-4 hover:bg-accent-soft transition-colors cursor-pointer disabled:opacity-80 disabled:cursor-wait"
         >
-          {requesting ? "Finding nearby rider…" : `Request rider · ${vehicles.find((v) => v.key === vehicle)?.fare}`}
+          {requesting
+            ? "Finding nearby rider…"
+            : quoting
+            ? "Pricing…"
+            : quote
+            ? `Request rider · ${formatNaira(quote.amountKobo)}`
+            : "Enter both addresses to see a price"}
         </button>
       </form>
     </div>

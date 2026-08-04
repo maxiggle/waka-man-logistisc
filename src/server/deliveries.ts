@@ -10,16 +10,22 @@
 // from the price table at payment time — so a price change between booking
 // and payment rejected the customer's payment as underpayment.
 //
-// Stamping quotedAmountKobo here fixes all three at once, and lets
-// `allow create` on deliveries drop to false in firestore.rules.
+// WM-101 Phase 1 moves pricing itself one step earlier: booking no longer
+// prices the trip at all, it reads back a quotes/{id} doc created by
+// POST /api/quotes (src/server/quotes.ts) moments earlier. See that file's
+// header for why re-pricing here would be wrong even though it's tempting —
+// Directions can return a slightly different route on a second call.
+//
+// Stamping quotedAmountKobo here fixes all three original problems at once,
+// and lets `allow create` on deliveries drop to false in firestore.rules.
 
 import { getAdminDb } from "@/server/firebaseAdmin";
-import { quoteKobo } from "@/server/fare";
+import { getQuoteForBooking } from "@/server/quotes";
 import { deliveryCreateSchema } from "@/lib/schemas";
 
 export type CreateDeliveryResult =
   | { ok: true; deliveryId: string; quotedAmountKobo: number }
-  | { ok: false; status: 400 | 500; error: string };
+  | { ok: false; status: 400 | 403 | 404 | 409 | 500; error: string };
 
 export async function createDelivery(
   input: unknown,
@@ -39,11 +45,11 @@ export async function createDelivery(
       error: first ? `${first.path.join(".") || "body"}: ${first.message}` : "Invalid booking details.",
     };
   }
-  const { pickup, dropoff, vehicle, packageNote } = parsed.data;
+  const { quoteId, packageNote } = parsed.data;
 
-  // Priced once, here. Everything downstream reads this number back off the
-  // document rather than recomputing it.
-  const quotedAmountKobo = quoteKobo(vehicle, pickup, dropoff);
+  const quoteResult = await getQuoteForBooking(quoteId, callerUid);
+  if (!quoteResult.ok) return { ok: false, status: quoteResult.status, error: quoteResult.error };
+  const quote = quoteResult.quote;
 
   const now = Date.now();
   const db = getAdminDb();
@@ -55,14 +61,17 @@ export async function createDelivery(
     clientEmail: callerEmail || "",
     riderId: null,
     status: "pending",
-    pickup,
-    dropoff,
-    vehicle,
+    pickup: quote.pickup,
+    dropoff: quote.dropoff,
+    vehicle: quote.vehicle,
     packageNote: packageNote ?? "",
-    quotedAmountKobo,
+    quotedAmountKobo: quote.amountKobo,
+    distanceMeters: quote.distanceMeters,
+    durationSeconds: quote.durationSeconds,
+    pricingBasis: quote.basis,
     createdAt: now,
     updatedAt: now,
   });
 
-  return { ok: true, deliveryId: deliveryRef.id, quotedAmountKobo };
+  return { ok: true, deliveryId: deliveryRef.id, quotedAmountKobo: quote.amountKobo };
 }

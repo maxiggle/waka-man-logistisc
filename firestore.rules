@@ -154,8 +154,22 @@ service cloud.firestore {
       // recursive `{document=**}` rule on the parent leaks this to the
       // rider too — it must be named explicitly like this.
       //
-      // clientId is stored on this document itself rather than read off the
-      // parent via get(), so the read rule stays a single-document check.
+      // The read is authorized against the PARENT delivery's clientId, not
+      // this document's own. That reads like an unnecessary get() until you
+      // consider the unpaid case: this document does not exist yet, so
+      // `resource` is null, and `resource.data.clientId` is an evaluation
+      // error — which Firestore surfaces as permission-denied. The customer
+      // then sees "you don't have permission to view this delivery's code"
+      // on their own delivery, when the truth is simply that they haven't
+      // paid yet. Checking the parent gives the same answer whether or not
+      // the code exists.
+      //
+      // An earlier version stored clientId here specifically to avoid a
+      // get(), because booking wrote this doc in the same batch as the
+      // parent and a get() can't see sibling writes in a batch. That
+      // constraint is gone — only applySuccessfulPayment creates this now,
+      // on the Admin SDK, long after the delivery exists. clientId stays on
+      // the document for the server's own use.
       //
       // WRITES ARE FULLY DENIED, and that is load-bearing. This document
       // existing is what unlocks handover: completeDelivery treats its
@@ -167,7 +181,8 @@ service cloud.firestore {
       // applySuccessfulPayment (src/server/payments.ts) creates this, on
       // the Admin SDK, after Paystack confirms the charge cleared.
       match /private/{docId} {
-        allow read: if isSignedIn() && resource.data.clientId == request.auth.uid;
+        allow read: if isSignedIn() &&
+          get(/databases/$(database)/documents/deliveries/$(deliveryId)).data.clientId == request.auth.uid;
         allow create, update, delete: if false;
       }
 

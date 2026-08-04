@@ -13,6 +13,7 @@ export default function AddressAutocomplete({
   onSelect,
   resolved,
   proximity,
+  serviceArea,
 }: {
   id: string;
   label: string;
@@ -20,8 +21,10 @@ export default function AddressAutocomplete({
   onQueryChange: (query: string) => void;
   onSelect: (suggestion: AddressSuggestion) => void;
   resolved: AddressSuggestion | null;
-  /** Ordering bias for search results — e.g. the resolved default service area. */
+  /** Ordering bias for search results — may be the customer's own position, not necessarily the service area. */
   proximity?: { lat: number; lng: number };
+  /** Hard filter (WM-102): results further than MAX_GEOCODE_DISTANCE_FROM_AREA_KM from this are dropped. */
+  serviceArea?: { lat: number; lng: number };
 }) {
   const [suggestions, setSuggestions] = useState<AddressSuggestion[]>([]);
   const [loading, setLoading] = useState(false);
@@ -35,7 +38,7 @@ export default function AddressAutocomplete({
     let cancelled = false;
     const timer = setTimeout(() => {
       setLoading(true);
-      suggestAddresses(value, proximity)
+      suggestAddresses(value, proximity, serviceArea)
         .then((results) => {
           if (!cancelled) setSuggestions(results);
         })
@@ -64,7 +67,7 @@ export default function AddressAutocomplete({
     debounceRef.current = setTimeout(async () => {
       setLoading(true);
       try {
-        setSuggestions(await suggestAddresses(next, proximity));
+        setSuggestions(await suggestAddresses(next, proximity, serviceArea));
       } catch {
         setSuggestions([]);
       } finally {

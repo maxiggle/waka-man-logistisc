@@ -2,7 +2,9 @@
 // coordinates that used to make proximity matching meaningless. Autocomplete
 // resolves coordinates at selection time, so the booking submit path never
 // has to disambiguate free-text against multiple geocoder results.
+import { distanceBetween, type Geopoint } from "geofire-common";
 import { MAPBOX_TOKEN, hasMapbox } from "@/lib/mapbox";
+import { MAX_GEOCODE_DISTANCE_FROM_AREA_KM } from "@/lib/dispatchConfig";
 
 export type AddressSuggestion = {
   address: string;
@@ -31,14 +33,29 @@ function isValidFeature(f: MapboxFeature): f is { place_name: string; center: [n
 
 /**
  * Forward-geocodes a partial address into a short list of candidates,
- * nearest-relevance first. `proximity` is an ordering bias only — nothing is
- * excluded, nearby results just rank first; `country` is a hard filter,
- * since this is a Nigeria-only service and a result elsewhere would create a
- * delivery that can never be matched.
+ * nearest-relevance first.
+ *
+ * `proximity` is an ordering bias only — nothing is excluded, nearby results
+ * just rank first. It's deliberately allowed to be the customer's own live
+ * position, which may not be the service area itself (e.g. booking a
+ * delivery in the area while travelling).
+ *
+ * `serviceArea`, when given, is a hard filter (WM-102): any result further
+ * than MAX_GEOCODE_DISTANCE_FROM_AREA_KM from it is dropped rather than
+ * ranked low, because under distance pricing a wildly-mislocated result
+ * doesn't just rank badly, it silently changes the price. Deliberately a
+ * separate parameter from `proximity` rather than reusing it — the filter
+ * must anchor to the actual service area regardless of where the customer
+ * is standing.
+ *
+ * `country` is a hard filter for the same underlying reason: this is a
+ * Nigeria-only service and a result elsewhere would create a delivery
+ * nothing can ever be matched to serve.
  */
 export async function suggestAddresses(
   searchText: string,
   proximity?: { lat: number; lng: number },
+  serviceArea?: { lat: number; lng: number },
 ): Promise<AddressSuggestion[]> {
   if (!hasMapbox()) return [];
   const trimmed = searchText.trim();
@@ -59,7 +76,7 @@ export async function suggestAddresses(
   if (!res.ok) throw new Error("Failed to look up address suggestions.");
 
   const data: { features?: MapboxFeature[] } = await res.json();
-  return (data.features ?? [])
+  const suggestions = (data.features ?? [])
     .filter(isValidFeature)
     // Mapbox returns center as [longitude, latitude] — do not swap this order.
     .map((f) => ({
@@ -67,4 +84,8 @@ export async function suggestAddresses(
       lng: f.center[0],
       lat: f.center[1],
     }));
+
+  if (!serviceArea) return suggestions;
+  const areaCenter: Geopoint = [serviceArea.lat, serviceArea.lng];
+  return suggestions.filter((s) => distanceBetween([s.lat, s.lng], areaCenter) <= MAX_GEOCODE_DISTANCE_FROM_AREA_KM);
 }

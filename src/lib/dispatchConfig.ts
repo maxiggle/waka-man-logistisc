@@ -133,7 +133,16 @@ export interface TransportMode {
 }
 
 export const TRANSPORT_MODES: Record<RiderVehicle, TransportMode> = {
-  motorbike: { id: "motorbike", label: "Motorbike", serviceLevels: ["standard", "express"], available: true },
+  // Express only. A motorbike is physically capable of a "standard" job
+  // too, but claiming both here made "standard" bookable — BOOKABLE_SERVICE_LEVELS
+  // is derived from what the available modes can fulfil — and put a second
+  // tier in front of customers that resolves to the identical vehicle at a
+  // lower price. There is one fleet; there should be one tier.
+  //
+  // Narrowing this also means motorbike riders are no longer eligible for
+  // "standard" deliveries. Nothing can create one any more, but any that
+  // predate this change are unmatchable.
+  motorbike: { id: "motorbike", label: "Motorbike", serviceLevels: ["express"], available: true },
   bicycle: { id: "bicycle", label: "Bicycle", serviceLevels: ["standard"], available: false },
   scooter: { id: "scooter", label: "Scooter", serviceLevels: ["standard"], available: false },
   car: { id: "car", label: "Car", serviceLevels: ["standard", "express", "bulk"], available: false },

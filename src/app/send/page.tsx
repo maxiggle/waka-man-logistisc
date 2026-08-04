@@ -18,6 +18,25 @@ import AddressAutocomplete from "@/components/AddressAutocomplete";
 /** How long to let typing/tier-switching settle before spending a Directions call on it. */
 const QUOTE_DEBOUNCE_MS = 400;
 
+/** Metres as "9.8 km" — one decimal, which is as precise as a road distance is worth quoting. */
+function formatKm(meters: number): string {
+  return `${(meters / 1000).toFixed(1)} km`;
+}
+
+/**
+ * Directions' duration as "~23 min". Null whenever the straight-line
+ * fallback produced the distance: there is no route, so there is no honest
+ * ETA — showing one derived from distance alone would be inventing it.
+ */
+function formatEta(seconds: number | null): string {
+  if (seconds === null) return "—";
+  const minutes = Math.max(1, Math.round(seconds / 60));
+  if (minutes < 60) return `~${minutes} min`;
+  const hours = Math.floor(minutes / 60);
+  const rest = minutes % 60;
+  return rest === 0 ? `~${hours} hr` : `~${hours} hr ${rest} min`;
+}
+
 // Keyed by ServiceLevel (not a plain array) so tsc fails the moment this
 // tier list and dispatchConfig's ServiceLevel drift apart in either direction.
 //
@@ -105,11 +124,21 @@ function SendForm() {
   // (WM-101). Any change to pickup/dropoff/vehicle invalidates the quote
   // immediately (there is no meaningful price for the old selection any
   // more) and the debounced fetch below produces a fresh one.
+  // Both addresses picked from suggestions AND still matching what's typed —
+  // an edited-but-unresolved field means the coordinates on hand belong to a
+  // different address. Shared with the trip-details panel so the two can't
+  // disagree about whether a quote is pending.
+  const addressesReady =
+    !!pickupResolved &&
+    pickupResolved.address === pickup &&
+    !!dropoffResolved &&
+    dropoffResolved.address === dropoff;
+
   useEffect(() => {
     setQuote(null);
     setQuoteError("");
 
-    if (!user || !pickupResolved || pickupResolved.address !== pickup || !dropoffResolved || dropoffResolved.address !== dropoff) {
+    if (!user || !addressesReady || !pickupResolved || !dropoffResolved) {
       setQuoting(false);
       return;
     }
@@ -273,51 +302,118 @@ function SendForm() {
           serviceArea={serviceArea}
         />
 
-        <fieldset className="pt-2">
-          <legend className="text-sm font-semibold text-ink/70">Vehicle</legend>
-          <div className="mt-2 space-y-2.5">
-            {vehicles.map((v) => (
-              <label
-                key={v.key}
-                className={`flex items-center justify-between rounded-xl border bg-white px-4 py-3.5 cursor-pointer transition-colors ${
-                  vehicle === v.key ? "border-accent ring-2 ring-accent/20" : "border-ink/15 hover:border-ink/30"
-                }`}
-              >
-                <span className="flex items-center gap-3">
-                  <input
-                    type="radio"
-                    name="vehicle"
-                    value={v.key}
-                    checked={vehicle === v.key}
-                    onChange={() => setVehicle(v.key)}
-                    className="accent-[#f16834]"
-                  />
-                  <span>
-                    <span className="font-bold text-ink">{v.name}</span>
-                    {v.hot && (
-                      <span className="ml-2 rounded bg-accent px-1.5 py-0.5 text-[9px] font-extrabold text-white align-middle">
-                        FASTEST
-                      </span>
-                    )}
-                    <span className="block text-xs text-ink/50">{v.meta}</span>
+        {/* The tier picker only exists when there is a choice to make. With
+            one bookable tier it was a radio group of one, presenting the
+            single fleet as if it were an option — and while motorbike
+            claimed "standard" too, it offered the same vehicle twice at
+            different prices. Rendering is derived rather than deleted:
+            flipping car.available restores a real choice automatically,
+            which is the whole point of the TRANSPORT_MODES registry. */}
+        {vehicles.length > 1 && (
+          <fieldset className="pt-2">
+            <legend className="text-sm font-semibold text-ink/70">Vehicle</legend>
+            <div className="mt-2 space-y-2.5">
+              {vehicles.map((v) => (
+                <label
+                  key={v.key}
+                  className={`flex items-center justify-between rounded-xl border bg-white px-4 py-3.5 cursor-pointer transition-colors ${
+                    vehicle === v.key ? "border-accent ring-2 ring-accent/20" : "border-ink/15 hover:border-ink/30"
+                  }`}
+                >
+                  <span className="flex items-center gap-3">
+                    <input
+                      type="radio"
+                      name="vehicle"
+                      value={v.key}
+                      checked={vehicle === v.key}
+                      onChange={() => setVehicle(v.key)}
+                      className="accent-[#f16834]"
+                    />
+                    <span>
+                      <span className="font-bold text-ink">{v.name}</span>
+                      {v.hot && (
+                        <span className="ml-2 rounded bg-accent px-1.5 py-0.5 text-[9px] font-extrabold text-white align-middle">
+                          FASTEST
+                        </span>
+                      )}
+                      <span className="block text-xs text-ink/50">{v.meta}</span>
+                    </span>
                   </span>
-                </span>
-                {/* Only the selected tier has a live price — switching tiers requotes
-                    rather than showing every tier's price at once, so this is the one
-                    Directions call in flight, not three. */}
-                <span className="font-bold text-primary">
-                  {v.key !== vehicle
-                    ? "—"
-                    : quoting
-                    ? "Pricing…"
-                    : quote
-                    ? formatNaira(quote.amountKobo)
-                    : "—"}
-                </span>
-              </label>
-            ))}
-          </div>
-        </fieldset>
+                  {/* Only the selected tier has a live price — switching tiers requotes
+                      rather than showing every tier's price at once, so this is the one
+                      Directions call in flight, not three. */}
+                  <span className="font-bold text-primary">
+                    {v.key !== vehicle ? "—" : quoting ? "Pricing…" : quote ? formatNaira(quote.amountKobo) : "—"}
+                  </span>
+                </label>
+              ))}
+            </div>
+          </fieldset>
+        )}
+
+        {/* Trip details. Distance, ETA and price are only knowable once both
+            addresses resolve and Directions answers, so this occupies the
+            space with an honest pending state instead of showing a price
+            that isn't real yet. Mirrors the quote effect's own condition so
+            the panel can't claim to be loading when nothing was requested. */}
+        <div className="rounded-xl border border-ink/15 bg-white px-4 py-4">
+          <p className="text-sm font-semibold text-ink/70">Trip details</p>
+
+          {!addressesReady ? (
+            <p className="mt-2 text-sm text-ink/45">
+              Enter both addresses to see distance, ETA and price.
+            </p>
+          ) : quoting ? (
+            <div className="mt-3 flex items-center gap-2.5 text-sm text-ink/60">
+              <span
+                className="h-4 w-4 shrink-0 animate-spin rounded-full border-2 border-ink/15 border-t-accent"
+                aria-hidden="true"
+              />
+              <span>Fetching details…</span>
+            </div>
+          ) : quote ? (
+            <>
+              <div className="mt-3 space-y-2.5">
+                <div className="flex gap-3">
+                  <span className="mt-1.5 h-2 w-2 shrink-0 rounded-full bg-accent" aria-hidden="true" />
+                  <span className="text-sm text-ink/80">{pickupResolved?.address}</span>
+                </div>
+                <div className="flex gap-3">
+                  <span className="mt-1.5 h-2 w-2 shrink-0 rounded-full bg-primary" aria-hidden="true" />
+                  <span className="text-sm text-ink/80">{dropoffResolved?.address}</span>
+                </div>
+              </div>
+
+              <dl className="mt-4 border-t border-ink/10 pt-3 space-y-2 text-sm">
+                <div className="flex items-center justify-between">
+                  <dt className="text-ink/50">Distance</dt>
+                  <dd className="font-semibold text-ink tabular-nums">{formatKm(quote.distanceMeters)}</dd>
+                </div>
+                <div className="flex items-center justify-between">
+                  <dt className="text-ink/50">ETA</dt>
+                  <dd className="font-semibold text-ink tabular-nums">{formatEta(quote.durationSeconds)}</dd>
+                </div>
+                <div className="flex items-center justify-between">
+                  <dt className="text-ink/50">Price</dt>
+                  <dd className="text-base font-extrabold text-primary tabular-nums">
+                    {formatNaira(quote.amountKobo)}
+                  </dd>
+                </div>
+              </dl>
+
+              {/* Said plainly rather than hidden: without a live route the
+                  distance is inferred, so the price is an estimate and
+                  there is no ETA to give. */}
+              {quote.basis === "straight_line_fallback" && (
+                <p className="mt-3 text-xs text-ink/45">
+                  Live route unavailable — distance and price are estimated.
+                </p>
+              )}
+            </>
+          ) : (
+            <p className="mt-2 text-sm text-ink/45">Couldn&apos;t price this trip.</p>
+          )}
+        </div>
 
         {quoteError && (
           <p className="rounded-xl bg-red-50 border border-red-200 text-red-700 text-sm px-3 py-2">{quoteError}</p>
@@ -331,10 +427,10 @@ function SendForm() {
           {requesting
             ? "Finding nearby rider…"
             : quoting
-            ? "Pricing…"
+            ? "Fetching details…"
             : quote
             ? `Request rider · ${formatNaira(quote.amountKobo)}`
-            : "Enter both addresses to see a price"}
+            : "Enter both addresses to continue"}
         </button>
       </form>
     </div>

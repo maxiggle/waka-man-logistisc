@@ -22,10 +22,29 @@ service cloud.firestore {
       return exists(/databases/$(database)/documents/adminInvites/$(email));
     }
 
+    function isSuperAdminInvited(email) {
+      return exists(/databases/$(database)/documents/superadminInvites/$(email));
+    }
+
+    // Superadmin ⊃ admin (WM-103): a superadmin is a strict superset of an
+    // admin — delivery/rider oversight plus pricing control, not two
+    // disjoint grants — so anywhere isAdmin() gates a read/write, a
+    // superadmin qualifies too. isSuperAdmin() below stays the strict,
+    // pricing-only check.
     function isAdmin() {
       return isSignedIn() &&
         exists(/databases/$(database)/documents/users/$(request.auth.uid)) &&
-        get(/databases/$(database)/documents/users/$(request.auth.uid)).data.role == 'admin';
+        get(/databases/$(database)/documents/users/$(request.auth.uid)).data.role in ['admin', 'superadmin'];
+    }
+
+    // Distinct from isAdmin() on purpose (WM-101 Phase 2) — the strict,
+    // pricing-only check. Use this to gate pricing-specific actions;
+    // everything else that used to mean "admin" should keep using isAdmin(),
+    // which a superadmin now also satisfies.
+    function isSuperAdmin() {
+      return isSignedIn() &&
+        exists(/databases/$(database)/documents/users/$(request.auth.uid)) &&
+        get(/databases/$(database)/documents/users/$(request.auth.uid)).data.role == 'superadmin';
     }
 
     // --- users/{uid} (merged from firestore.rules.admin-invites) ---
@@ -43,36 +62,67 @@ service cloud.firestore {
     match /users/{uid} {
       allow read: if isSignedIn() && (request.auth.uid == uid || isAdmin());
 
-      // A user may only write role: "admin" onto their own doc if their
-      // email currently has an admin invite — otherwise any non-admin role
-      // is fine to self-set (matches client/rider self-registration).
+      // A user may only write role: "admin"/"superadmin" onto their own doc
+      // if their email currently has the matching invite — otherwise any
+      // other role is fine to self-set (matches client/rider self-registration).
       allow create: if isSignedIn() && request.auth.uid == uid &&
-        (request.resource.data.role != 'admin' || isInvited(myEmail()));
+        (request.resource.data.role != 'admin' || isInvited(myEmail())) &&
+        (request.resource.data.role != 'superadmin' || isSuperAdminInvited(myEmail()));
 
       // deliveriesCompleted/ratingAvg/ratingCount are server-authoritative
       // (src/server/deliveryLifecycle.ts increments the first; the Admin
       // SDK bypasses this rule) — a client must never be able to move
       // either, including via their own otherwise-legitimate self-updates.
+      // Self-writes only. There is deliberately no `|| isAdmin()` arm here.
+      //
+      // There used to be one, unconstrained, so that client-side invite
+      // revocation could step a demoted user down by writing role onto
+      // their document. It also let any admin write role: 'superadmin'
+      // onto their OWN document — granting themselves pricing control
+      // without an invite, which is precisely what superadminInvites
+      // exists to gate — and let an admin forge the deliveriesCompleted /
+      // ratingAvg / ratingCount values the self-arm below protects.
+      // Confirmed exploitable against this ruleset before it was removed.
+      //
+      // Revocation now runs on the Admin SDK (src/server/invites.ts, via
+      // /api/admin/invites), which bypasses these rules, so nothing
+      // legitimate needs a client-side write to someone else's document.
+      // Admins keep read access via the allow read above.
       allow update: if isSignedIn() &&
-        (
-          (request.auth.uid == uid &&
-            (request.resource.data.role == resource.data.role ||
-             request.resource.data.role != 'admin' ||
-             isInvited(myEmail())) &&
-            request.resource.data.get('deliveriesCompleted', 0) == resource.data.get('deliveriesCompleted', 0) &&
-            request.resource.data.get('ratingAvg', 0) == resource.data.get('ratingAvg', 0) &&
-            request.resource.data.get('ratingCount', 0) == resource.data.get('ratingCount', 0))
-          || isAdmin()
-        );
+        request.auth.uid == uid &&
+        (request.resource.data.role == resource.data.role ||
+         (request.resource.data.role != 'admin' || isInvited(myEmail())) &&
+         (request.resource.data.role != 'superadmin' || isSuperAdminInvited(myEmail()))) &&
+        request.resource.data.get('deliveriesCompleted', 0) == resource.data.get('deliveriesCompleted', 0) &&
+        request.resource.data.get('ratingAvg', 0) == resource.data.get('ratingAvg', 0) &&
+        request.resource.data.get('ratingCount', 0) == resource.data.get('ratingCount', 0);
     }
 
+    // Both invite collections are READ-ONLY to clients. Granting and
+    // revoking run on the Admin SDK (src/server/invites.ts via
+    // /api/admin/invites), because revocation has to step the demoted user
+    // down — a write to someone else's users/{uid} doc that clients are no
+    // longer permitted to make.
+    //
+    // Moving the writes also makes the superadmin guards real rather than
+    // advisory: "you can't revoke yourself" and "you can't remove the last
+    // superadmin" were enforced in browser code while these rules happily
+    // allowed deleting the document directly.
     match /adminInvites/{email} {
       // Anyone can check their own invite status (needed on every sign-in);
-      // only admins can browse the full list or create/revoke invites.
+      // only admins can browse the full list.
       allow get: if isSignedIn() && (myEmail() == email || isAdmin());
       allow list: if isAdmin();
-      allow create, delete: if isAdmin();
-      allow update: if false;
+      allow write: if false;
+    }
+
+    match /superadminInvites/{email} {
+      // Mirrors adminInvites, but listing is gated on isSuperAdmin() — an
+      // ordinary admin has no business enumerating who holds pricing
+      // control (see the isSuperAdmin() comment above).
+      allow get: if isSignedIn() && (myEmail() == email || isSuperAdmin());
+      allow list: if isSuperAdmin();
+      allow write: if false;
     }
 
     // --- deliveries/{deliveryId} ---
@@ -128,6 +178,34 @@ service cloud.firestore {
       match /paymentAttempts/{reference} {
         allow read, write: if false;
       }
+    }
+
+    // --- quotes/{quoteId} ---
+    //
+    // Server-only in both directions, same reasoning as paymentAttempts
+    // above: POST /api/quotes (src/server/quotes.ts) creates these on the
+    // Admin SDK and returns the priced result directly in its response, so
+    // the client never needs to read the document itself, and a client
+    // write here would be an unpriced quote nothing computed.
+    match /quotes/{quoteId} {
+      allow read, write: if false;
+    }
+
+    // --- config/pricing, pricingHistory/{id} (WM-101 Phase 2) ---
+    //
+    // Server-read only, in both directions — even for a signed-in
+    // superadmin. The dashboard at /admin/pricing never reads Firestore
+    // directly; it goes through /api/admin/pricing (GET/POST) and
+    // /api/admin/pricing/history, all on the Admin SDK, which is what lets
+    // this stay deny-all here rather than needing a rules-level notion of
+    // "superadmin" for reads. Keeping margin structure out of anything a
+    // browser can query is the point — the client only ever needs the
+    // already-computed quote from /api/quotes.
+    match /config/{docId} {
+      allow read, write: if false;
+    }
+    match /pricingHistory/{entryId} {
+      allow read, write: if false;
     }
 
     // --- riderAvailability/{uid} ---

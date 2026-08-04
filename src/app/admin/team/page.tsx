@@ -6,6 +6,13 @@ import { useRouter } from "next/navigation";
 import { useAuth } from "@/context/AuthContext";
 import { isFirebaseConfigured } from "@/lib/firebase";
 import { inviteAdmin, listAdminInvites, revokeAdminInvite, type AdminInvite } from "@/lib/admin";
+import {
+  inviteSuperAdmin,
+  listSuperAdminInvites,
+  revokeSuperAdminInvite,
+  type SuperAdminInvite,
+} from "@/lib/superadmin";
+import { hasAdminAccess } from "@/lib/roles";
 
 export default function AdminTeamPage() {
   const router = useRouter();
@@ -19,6 +26,17 @@ export default function AdminTeamPage() {
   const [revoking, setRevoking] = useState<string | null>(null);
   const [checkingAdmin, setCheckingAdmin] = useState(true);
   const [isAdmin, setIsAdmin] = useState(false);
+  // Distinct from isAdmin — a plain admin reaches this page too (WM-103:
+  // superadmin ⊃ admin), but pricing control stays a superadmin-only grant,
+  // so the section below is gated on this, not isAdmin.
+  const [canEditPricing, setCanEditPricing] = useState(false);
+
+  const [superInvites, setSuperInvites] = useState<SuperAdminInvite[]>([]);
+  const [superLoading, setSuperLoading] = useState(true);
+  const [superEmail, setSuperEmail] = useState("");
+  const [superSubmitting, setSuperSubmitting] = useState(false);
+  const [superError, setSuperError] = useState("");
+  const [superRevoking, setSuperRevoking] = useState<string | null>(null);
 
   // Re-check invite/admin status on every visit — see refreshUserProfile
   // in AuthContext.tsx for why this can't just rely on cached context state.
@@ -33,8 +51,9 @@ export default function AdminTeamPage() {
     (async () => {
       const profile = await refreshUserProfile();
       if (cancelled) return;
-      const admin = profile?.role === "admin";
+      const admin = hasAdminAccess(profile?.role);
       setIsAdmin(admin);
+      setCanEditPricing(profile?.role === "superadmin");
       setCheckingAdmin(false);
       if (!admin) router.replace("/dashboard");
     })();
@@ -63,13 +82,32 @@ export default function AdminTeamPage() {
     load();
   }, [authLoading, checkingAdmin, user, isAdmin]);
 
+  useEffect(() => {
+    if (authLoading || checkingAdmin || !user || !canEditPricing) return;
+
+    async function load() {
+      if (!isFirebaseConfigured) {
+        setSuperLoading(false);
+        return;
+      }
+      try {
+        setSuperInvites(await listSuperAdminInvites());
+      } catch (err) {
+        console.error("Failed to load superadmin invites:", err);
+      } finally {
+        setSuperLoading(false);
+      }
+    }
+    load();
+  }, [authLoading, checkingAdmin, user, canEditPricing]);
+
   async function handleInvite(e: React.FormEvent) {
     e.preventDefault();
     if (!user) return;
     setError("");
     setSubmitting(true);
     try {
-      await inviteAdmin(email, user.uid);
+      await inviteAdmin(email);
       setEmail("");
       setInvites(await listAdminInvites());
     } catch (err) {
@@ -90,6 +128,39 @@ export default function AdminTeamPage() {
       setError(err instanceof Error ? err.message : "Failed to revoke access.");
     } finally {
       setRevoking(null);
+    }
+  }
+
+  async function handleInviteSuperAdmin(e: React.FormEvent) {
+    e.preventDefault();
+    if (!user) return;
+    setSuperError("");
+    setSuperSubmitting(true);
+    try {
+      await inviteSuperAdmin(superEmail);
+      setSuperEmail("");
+      setSuperInvites(await listSuperAdminInvites());
+    } catch (err) {
+      console.error("Failed to invite superadmin:", err);
+      setSuperError(err instanceof Error ? err.message : "Failed to send invite.");
+    } finally {
+      setSuperSubmitting(false);
+    }
+  }
+
+  async function handleRevokeSuperAdmin(inviteEmail: string) {
+    setSuperError("");
+    setSuperRevoking(inviteEmail);
+    try {
+      // No caller email passed — the self-revoke guard compares against the
+      // verified token server-side, not a value this page supplies.
+      await revokeSuperAdminInvite(inviteEmail);
+      setSuperInvites((prev) => prev.filter((i) => i.email !== inviteEmail));
+    } catch (err) {
+      console.error("Failed to revoke superadmin invite:", err);
+      setSuperError(err instanceof Error ? err.message : "Failed to revoke access.");
+    } finally {
+      setSuperRevoking(null);
     }
   }
 
@@ -183,6 +254,81 @@ export default function AdminTeamPage() {
             </ul>
           )}
         </div>
+
+        {canEditPricing && (
+          <>
+            <p className="mt-10 text-[10px] font-bold tracking-[0.18em] uppercase text-white/40">Pricing control</p>
+            <h2 className="mt-1 text-xl font-extrabold">Manage superadmins</h2>
+            <p className="mt-2 text-sm text-white/50 max-w-xl">
+              Superadmins can change what customers are charged, in addition to everything an admin can
+              do. A separate grant from admin above — inviting someone as admin does not give them this.
+            </p>
+
+            <form onSubmit={handleInviteSuperAdmin} className="mt-6 flex gap-3">
+              <input
+                type="email"
+                required
+                value={superEmail}
+                onChange={(e) => setSuperEmail(e.target.value)}
+                placeholder="teammate@company.com"
+                className="flex-1 rounded-xl bg-white/5 border border-white/10 px-4 py-3 text-sm placeholder:text-white/30 focus:outline-none focus:border-accent"
+              />
+              <button
+                type="submit"
+                disabled={superSubmitting}
+                className="rounded-xl bg-accent text-[#141019] font-bold text-sm px-5 py-3 hover:bg-accent-tint transition-colors disabled:opacity-50 cursor-pointer"
+              >
+                {superSubmitting ? "Inviting..." : "Invite as superadmin"}
+              </button>
+            </form>
+            {superError && <p className="mt-3 text-sm text-red-400">{superError}</p>}
+
+            <div className="mt-8 rounded-2xl bg-white/5 border border-white/10 overflow-hidden">
+              <p className="px-5 pt-4 pb-2 text-[10px] font-bold tracking-[0.18em] uppercase text-white/40">
+                Invited superadmins
+              </p>
+              {superLoading ? (
+                <div className="p-8 text-center text-white/40 text-sm animate-pulse">Loading invites...</div>
+              ) : superInvites.length === 0 ? (
+                <div className="p-8 text-center text-white/40 text-sm">No superadmins invited yet.</div>
+              ) : (
+                <ul>
+                  {superInvites.map((invite) => {
+                    const isSelf = invite.email === user.email?.trim().toLowerCase();
+                    return (
+                      <li
+                        key={invite.email}
+                        className="flex items-center justify-between px-5 py-3 border-t border-white/5"
+                      >
+                        <div>
+                          <p className="text-sm font-semibold flex items-center gap-2">
+                            {invite.email}
+                            {isSelf && (
+                              <span className="rounded bg-white/10 text-white/50 text-[10px] font-bold uppercase tracking-wide px-1.5 py-0.5">
+                                You
+                              </span>
+                            )}
+                          </p>
+                          <p className="text-xs text-white/40">
+                            Invited {new Date(invite.invitedAt).toLocaleDateString()}
+                          </p>
+                        </div>
+                        <button
+                          onClick={() => handleRevokeSuperAdmin(invite.email)}
+                          disabled={superRevoking === invite.email || isSelf}
+                          title={isSelf ? "Have another superadmin revoke your access." : undefined}
+                          className="text-xs font-semibold text-red-400 hover:text-red-300 transition-colors cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed"
+                        >
+                          {superRevoking === invite.email ? "Revoking..." : "Revoke"}
+                        </button>
+                      </li>
+                    );
+                  })}
+                </ul>
+              )}
+            </div>
+          </>
+        )}
       </div>
     </main>
   );

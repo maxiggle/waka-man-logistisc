@@ -1,14 +1,6 @@
-import {
-  collection,
-  deleteDoc,
-  doc,
-  getDoc,
-  getDocs,
-  query,
-  setDoc,
-  where,
-} from "firebase/firestore";
+import { collection, doc, getDoc, getDocs } from "firebase/firestore";
 import { db } from "@/lib/firebase";
+import { inviteRequest } from "@/lib/inviteClient";
 
 // Admin status is invite-gated: a user is promoted to role "admin" only if
 // their email has a matching doc in `adminInvites` (see AuthContext.tsx,
@@ -31,31 +23,23 @@ export async function isEmailInvited(email: string): Promise<boolean> {
   return snap.exists();
 }
 
-export async function inviteAdmin(email: string, invitedByUid: string): Promise<void> {
-  if (!db) throw new Error("Firestore is not configured.");
-  const normalized = normalizeEmail(email);
-  const invite: AdminInvite = {
-    email: normalized,
-    invitedBy: invitedByUid,
-    invitedAt: Date.now(),
-  };
-  await setDoc(doc(db, "adminInvites", normalized), invite);
+/**
+ * Grants an admin invite. No invitedBy argument: the server takes the
+ * caller's uid from the verified token, so it can't be misreported.
+ */
+export async function inviteAdmin(email: string): Promise<void> {
+  await inviteRequest("POST", "admin", email);
 }
 
+/**
+ * Revokes an admin invite and steps down anyone already promoted under it,
+ * so revoking actually takes access away rather than only blocking future
+ * re-promotion. Both happen server-side (src/server/invites.ts) — the
+ * step-down writes to another user's document, which firestore.rules no
+ * longer permits from a browser.
+ */
 export async function revokeAdminInvite(email: string): Promise<void> {
-  if (!db) throw new Error("Firestore is not configured.");
-  const normalized = normalizeEmail(email);
-  await deleteDoc(doc(db, "adminInvites", normalized));
-
-  // Also step down anyone already promoted under this invite so revoking
-  // access actually takes it away, not just blocks future re-promotion.
-  const usersQuery = query(collection(db, "users"), where("email", "==", normalized));
-  const usersSnap = await getDocs(usersQuery);
-  await Promise.all(
-    usersSnap.docs
-      .filter((d) => d.data().role === "admin")
-      .map((d) => setDoc(doc(db!, "users", d.id), { role: "client" }, { merge: true }))
-  );
+  await inviteRequest("DELETE", "admin", email);
 }
 
 export async function listAdminInvites(): Promise<AdminInvite[]> {

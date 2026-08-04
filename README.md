@@ -34,3 +34,15 @@ You can check out [the Next.js GitHub repository](https://github.com/vercel/next
 The easiest way to deploy your Next.js app is to use the [Vercel Platform](https://vercel.com/new?utm_medium=default-template&filter=next.js&utm_source=create-next-app&utm_campaign=create-next-app-readme) from the creators of Next.js.
 
 Check out our [Next.js deployment documentation](https://nextjs.org/docs/app/building-your-application/deploying) for more details.
+
+## Deploy checklist
+
+**Before the first deploy that includes distance-based pricing (WM-101 Phase 2 and later), run the seed script against that environment:**
+
+```bash
+pnpm run seed
+```
+
+Booking is priced from `config/pricing` (`src/server/pricingConfig.ts`), which fails closed — a missing or invalid document means **every quote 422s and no customer can book anything** (WM-104). The seed script is idempotent: it only ever creates `config/pricing` and the first `superadminInvites/{email}` entry when they're entirely absent, and never touches either if they already exist, so it's safe to run on every deploy, not just the first. Set `INITIAL_SUPERADMIN_EMAIL` before running it to also seed the first superadmin invite in one step (WM-105) — otherwise the pricing dashboard stays unreachable until someone is invited by hand in the Firebase console.
+
+`/admin` shows a red banner if `config/pricing` is missing or fails validation — that's the operator-facing signal this step was missed or something corrupted the document later. The customer-facing failure (a 422 on `/api/quotes`) stays deliberately vague.

@@ -8,6 +8,8 @@ import { db, isFirebaseConfigured } from "@/lib/firebase";
 import { useAuth } from "@/context/AuthContext";
 import type { DeliveryItem, DeliveryStatus } from "@/lib/schemas";
 import { formatQuote } from "@/lib/money";
+import { hasAdminAccess } from "@/lib/roles";
+import { fetchPricingStatus } from "@/lib/pricingAdmin";
 
 const STATUS_META: Record<DeliveryStatus, { label: string; cls: string }> = {
   pending: { label: "Pending rider", cls: "bg-primary-light/20 text-primary-light" },
@@ -63,6 +65,10 @@ export default function AdminPage() {
   const [search, setSearch] = useState("");
   const [checkingAdmin, setCheckingAdmin] = useState(true);
   const [isAdmin, setIsAdmin] = useState(false);
+  // null = not checked yet (or the check itself failed) — deliberately not
+  // treated as unhealthy, so a transient network blip doesn't flash a false
+  // "booking is down" banner. Only an explicit `false` from the API means that.
+  const [pricingHealthy, setPricingHealthy] = useState<boolean | null>(null);
 
   // Re-check invite/admin status on every visit (not just at sign-in) so
   // an invite added while already signed in takes effect without a full
@@ -78,7 +84,7 @@ export default function AdminPage() {
     (async () => {
       const profile = await refreshUserProfile();
       if (cancelled) return;
-      const admin = profile?.role === "admin";
+      const admin = hasAdminAccess(profile?.role);
       setIsAdmin(admin);
       setCheckingAdmin(false);
       if (!admin) router.replace("/dashboard");
@@ -136,6 +142,16 @@ export default function AdminPage() {
     if (authLoading || checkingAdmin || !user || !isAdmin) return;
     fetchAdminData();
   }, [authLoading, checkingAdmin, user, isAdmin, fetchAdminData]);
+
+  // WM-104: config/pricing missing/invalid means every booking 422s with no
+  // other visible symptom — this is what makes that an unmissable banner
+  // instead of something an operator only discovers from a customer complaint.
+  useEffect(() => {
+    if (authLoading || checkingAdmin || !user || !isAdmin) return;
+    fetchPricingStatus()
+      .then((status) => setPricingHealthy(status.healthy))
+      .catch((err) => console.error("Failed to check pricing config health:", err));
+  }, [authLoading, checkingAdmin, user, isAdmin]);
 
   async function handleRefresh() {
     setRefreshing(true);
@@ -237,6 +253,15 @@ export default function AdminPage() {
         <Icon path={ICONS.pin} className="h-4 w-4" />
         Service areas
       </Link>
+      {/* Strictly role === "superadmin", not hasAdminAccess() — a plain admin
+          reaches this page too (WM-103: superadmin ⊃ admin), but pricing
+          control is the one thing that stays a superadmin-only grant. */}
+      {userProfile?.role === "superadmin" && (
+        <Link href="/admin/pricing" className="flex items-center gap-3 rounded-xl px-3 py-2.5 text-sm font-semibold text-white/60 hover:text-white hover:bg-white/5 transition-colors cursor-pointer">
+          <Icon path={ICONS.grid} className="h-4 w-4" />
+          Pricing
+        </Link>
+      )}
       <Link href="/" className="flex items-center gap-3 rounded-xl px-3 py-2.5 text-sm font-semibold text-white/60 hover:text-white hover:bg-white/5 transition-colors cursor-pointer">
         <Icon path={ICONS.exit} className="h-4 w-4" />
         Exit
@@ -323,6 +348,17 @@ export default function AdminPage() {
             <Link href="/" className="font-semibold text-white/60 hover:text-white transition-colors cursor-pointer">Exit</Link>
           </div>
         </header>
+
+        {pricingHealthy === false && (
+          <div className="bg-red-600 text-white px-6 py-3 text-sm font-semibold flex flex-wrap items-center justify-center gap-2 text-center">
+            <span>
+              Pricing isn&apos;t configured — <strong>no customer can book a delivery right now.</strong>
+            </span>
+            <span className="text-white/80 font-normal">
+              Run the seed script (see WM-104), or check server logs for why config/pricing is failing.
+            </span>
+          </div>
+        )}
 
         <div className="mx-auto max-w-[1400px] px-6 py-8">
           {!isFirebaseConfigured ? (

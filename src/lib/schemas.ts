@@ -105,6 +105,15 @@ export interface DeliveryItem {
    * cannot be paid for (src/server/payments.ts fails them closed).
    */
   quotedAmountKobo?: number;
+  // Distance pricing inputs (WM-101 Phase 1), frozen alongside
+  // quotedAmountKobo at booking — never recomputed, so these describe the
+  // trip as it was priced, not as it might be measured again later.
+  /** Road distance in meters, or haversine × DETOUR_FACTOR when Directions failed — see `pricingBasis`. */
+  distanceMeters?: number;
+  /** From Mapbox Directions; null when `pricingBasis` is the fallback (no duration estimate exists then). */
+  durationSeconds?: number | null;
+  /** "road" (Mapbox Directions) or "straight_line_fallback" — how `distanceMeters` was produced. */
+  pricingBasis?: "road" | "straight_line_fallback";
   // Confirmation code deliberately lives at deliveries/{id}/private/code,
   // not here — this document is what the assigned rider's own query reads,
   // and the code must not be in their memory before the recipient tells
@@ -200,27 +209,124 @@ const endpointSchema = z.object({
 });
 
 /**
- * The complete set of fields a customer may supply when booking. Everything
- * else on a delivery — clientId, status, riderId, quotedAmountKobo, all
- * timestamps — is derived server-side by src/server/deliveries.ts, so this
- * schema is also the authorization boundary: a field absent here cannot be
- * set by a caller at all. `.strict()` makes that enforcement rather than
- * convention, rejecting a body that tries to smuggle in extras.
- *
- * Note `vehicle` is validated here. Under the old client-write path the
- * rules could not check it, so an unrecognized tier produced a delivery that
- * was silently unpriceable and unmatchable; now it's a 400 at the door.
+ * What a customer supplies to price a trip before booking it
+ * (src/server/quotes.ts, POST /api/quotes). `.strict()` for the same reason
+ * as deliveryCreateSchema below — a field not listed here cannot be smuggled
+ * through to influence the quote.
  */
-export const deliveryCreateSchema = z
+export const quoteRequestSchema = z
   .object({
     pickup: endpointSchema,
     dropoff: endpointSchema,
     vehicle: serviceLevelSchema,
+  })
+  .strict();
+
+export type QuoteRequestInput = z.infer<typeof quoteRequestSchema>;
+
+/**
+ * The complete set of fields a customer may supply when booking (WM-101
+ * Phase 1): a previously created quote, and nothing priced or geographic —
+ * pickup, dropoff, vehicle and the amount all come from the quotes/{id} doc
+ * src/server/deliveries.ts reads back, not from this body. Everything else
+ * on a delivery — clientId, status, riderId, quotedAmountKobo, all
+ * timestamps — is likewise derived server-side, so this schema is also the
+ * authorization boundary: a field absent here cannot be set by a caller at
+ * all. `.strict()` makes that enforcement rather than convention, rejecting
+ * a body that tries to smuggle in extras.
+ *
+ * Booking no longer re-prices from raw pickup/dropoff/vehicle — see the
+ * "Do not re-price at booking" note on WM-101: re-pricing here would let a
+ * customer see one figure at quote time and be charged a different one if
+ * Directions returns a slightly different route on the second call.
+ */
+export const deliveryCreateSchema = z
+  .object({
+    quoteId: z.string().min(1),
     packageNote: z.string().max(500).optional(),
   })
   .strict();
 
 export type DeliveryCreateInput = z.infer<typeof deliveryCreateSchema>;
+
+// --- Pricing config (WM-101 Phase 2) ---
+//
+// config/pricing is the admin-editable source of truth quoteFor() reads at
+// request time (src/server/pricingConfig.ts) — dispatchConfig.ts's
+// SERVICE_LEVEL_PRICING/ROUNDING_KOBO/DETOUR_FACTOR/MAX_TRIP_DISTANCE_KM
+// become only the seed values used to fill this document in in on rollout,
+// never read at request time again once it exists.
+//
+// Two schemas, not one: pricingTierSchema/pricingConfigSchema validate the
+// stored kobo document (read path, and what a malformed doc fails against);
+// pricingTierInputSchema/pricingConfigInputSchema validate what the admin
+// form actually submits, in naira — "the form accepts naira, the server
+// converts to kobo" is the single biggest unit-mistake risk in this ticket
+// (an admin typing 125 where kobo is expected sets the per-km rate 100×
+// too low), so naira never becomes a number a caller could accidentally
+// pass straight into the kobo-typed fields below.
+const pricingTierSchema = z
+  .object({
+    baseKobo: z.number().int().positive(),
+    perKmKobo: z.number().int().positive(),
+    minimumKobo: z.number().int().positive(),
+  })
+  .refine((t) => t.minimumKobo >= t.baseKobo, {
+    message: "minimumKobo must be at least baseKobo.",
+    path: ["minimumKobo"],
+  });
+
+export const pricingConfigSchema = z.object({
+  express: pricingTierSchema,
+  standard: pricingTierSchema,
+  bulk: pricingTierSchema,
+  roundingKobo: z.number().int().positive(),
+  detourFactor: z.number().min(1).max(5),
+  maxTripKm: z.number().int().positive().max(500),
+  updatedAt: z.number(),
+  updatedBy: z.string(),
+});
+
+export type PricingConfig = z.infer<typeof pricingConfigSchema>;
+
+/**
+ * Naira, not kobo — the admin form's unit, and the unit this schema exists
+ * to keep the UI in. Bounded loosely (positive, capped high) rather than
+ * tightly: the real "is this a sane price" judgment is the live preview
+ * table the admin sees as they type, not a validator that would need
+ * updating every time seed prices change.
+ */
+const pricingTierInputSchema = z
+  .object({
+    baseNaira: z.number().positive().max(1_000_000),
+    perKmNaira: z.number().positive().max(1_000_000),
+    minimumNaira: z.number().positive().max(1_000_000),
+  })
+  .refine((t) => t.minimumNaira >= t.baseNaira, {
+    message: "Minimum fare must be at least the base fare.",
+    path: ["minimumNaira"],
+  });
+
+export const pricingConfigInputSchema = z
+  .object({
+    express: pricingTierInputSchema,
+    standard: pricingTierInputSchema,
+    bulk: pricingTierInputSchema,
+    roundingNaira: z.number().positive().max(10_000),
+    detourFactor: z.number().min(1).max(5),
+    maxTripKm: z.number().int().positive().max(500),
+  })
+  .strict();
+
+export type PricingConfigInput = z.infer<typeof pricingConfigInputSchema>;
+
+/** One pricingHistory/{id} audit entry — the shape both the server writer and the admin dashboard's history list share. */
+export interface PricingHistoryEntry {
+  before: PricingConfig | null;
+  after: PricingConfig;
+  changedBy: string;
+  changedAt: number;
+}
 
 export const ratingSchema = z.object({
   deliveryId: z.string(),

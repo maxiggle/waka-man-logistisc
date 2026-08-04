@@ -37,6 +37,20 @@ export const AVAILABILITY_MATCH_FRESHNESS_MS = AVAILABILITY_TTL_MS;
 /** Widest radius matching will search before giving up. */
 export const MAX_SEARCH_RADIUS_KM = 50;
 
+/**
+ * A geocoded address further than this from the active service area's
+ * centre is rejected outright rather than silently accepted (WM-102). Under
+ * flat pricing a bad pin only misled matching; under distance pricing it
+ * sets the price — a query like "Rumuigbo Rivers State" can resolve ~30 km
+ * away in a different LGA and turn a ₦1,750 trip into a ₦4,500 one.
+ *
+ * Wider than MAX_TRIP_DISTANCE_KM on purpose: this bounds one endpoint's
+ * distance from the area centre, not the trip length between two endpoints,
+ * so it needs slack for a legitimate pickup and dropoff that are each far
+ * from the centre but close to each other.
+ */
+export const MAX_GEOCODE_DISTANCE_FROM_AREA_KM = 40;
+
 /** How long a rider has to accept before an offer lapses and the delivery returns to the pool. */
 export const OFFER_TTL_MS = 30_000;
 
@@ -168,24 +182,53 @@ export const VEHICLE_ELIGIBILITY: Record<RiderVehicle, ServiceLevel[]> = Object.
 export const FALLBACK_SERVICE_AREA = { name: "Port Harcourt", lat: 4.8156, lng: 7.0498 } as const;
 
 /**
- * The server-authoritative price of each service tier, in kobo (1 naira =
- * 100 kobo — Paystack's smallest unit). Read in exactly one place:
- * quoteKobo() in src/server/fare.ts, called once per booking by
- * src/server/deliveries.ts, which stamps the result onto the delivery as
- * `quotedAmountKobo`. Payment reads that stored quote, never this table —
- * so editing these numbers changes what *new* bookings cost and leaves
- * in-flight ones alone, rather than rejecting the payments of customers
- * who were quoted the old price.
+ * Per-tier distance pricing, in kobo (1 naira = 100 kobo — Paystack's
+ * smallest unit).
  *
- * Flat per-tier pricing is a deliberate minimal scope (W5-T1) — no
- * distance/time component yet, though quoteKobo() already receives both
- * endpoints so adding one is a change to that function alone. Note that
- * src/app/send/page.tsx reads this table directly to preview tier prices
- * before a delivery exists; that shortcut is only valid while fares are
- * flat, and a distance component means the preview needs a server quote.
+ * SEED VALUES ONLY (WM-101 Phase 2). quoteFor() (src/server/fare.ts) no
+ * longer reads this table — it reads config/pricing
+ * (src/server/pricingConfig.ts), the admin-editable document a superadmin
+ * maintains via /admin/pricing. This table is consulted in exactly one
+ * place now: pre-filling that dashboard's form the first time it's opened,
+ * before config/pricing exists. Once an admin saves, this table is inert —
+ * editing it does nothing to what customers are charged.
+ *
+ * fare = max(minimumKobo, baseKobo + perKmKobo × roadKm), then rounded up
+ * to the configured rounding step (see computeFareKobo in
+ * src/lib/pricingFormula.ts).
+ *
+ * standard/bulk are scaled from express by the same ratio the old flat
+ * fares used (0.6× / 1.6×) — not measured, just carried forward so the
+ * relative pricing between tiers doesn't jump. Expect rider rejections
+ * until real seed values are tuned (see WM-101's Launch risk note).
  */
-export const SERVICE_LEVEL_FARE_KOBO: Record<ServiceLevel, number> = {
-  express: 150_000,
-  standard: 90_000,
-  bulk: 240_000,
+export const SERVICE_LEVEL_PRICING: Record<
+  ServiceLevel,
+  { baseKobo: number; perKmKobo: number; minimumKobo: number }
+> = {
+  express: { baseKobo: 50_000, perKmKobo: 12_500, minimumKobo: 70_000 },
+  standard: { baseKobo: 30_000, perKmKobo: 7_500, minimumKobo: 45_000 },
+  bulk: { baseKobo: 80_000, perKmKobo: 20_000, minimumKobo: 110_000 },
 };
+
+/** Seed only (WM-101 Phase 2) — see SERVICE_LEVEL_PRICING. Charged amounts round up to the nearest rounding step. */
+export const ROUNDING_KOBO = 5_000;
+
+/**
+ * Seed only (WM-101 Phase 2) — see SERVICE_LEVEL_PRICING. Multiplier
+ * applied to straight-line (haversine) distance when Mapbox Directions
+ * fails and quoteFor() falls back to it. Port Harcourt's creeks mean
+ * great-circle distance systematically underpays relative to road distance
+ * — measured at 1.43× on an ordinary cross-town trip — so this errs above
+ * that rather than at 1.0.
+ */
+export const DETOUR_FACTOR = 1.5;
+
+/**
+ * Seed only (WM-101 Phase 2) — see SERVICE_LEVEL_PRICING. Trips longer than
+ * this are refused at quote time (422), not left pending forever with no
+ * rider able to serve them. Distinct from MAX_SEARCH_RADIUS_KM, which
+ * bounds rider→pickup distance during matching, not pickup→dropoff trip
+ * length.
+ */
+export const MAX_TRIP_DISTANCE_KM = 30;

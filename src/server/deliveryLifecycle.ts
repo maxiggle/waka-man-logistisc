@@ -7,7 +7,11 @@
 
 import { FieldValue } from "firebase-admin/firestore";
 import { getAdminDb } from "@/server/firebaseAdmin";
-import { DELIVERY_STATUS_TRANSITIONS, type DeliveryStatus } from "@/lib/schemas";
+import {
+  CANCELLABLE_DELIVERY_STATUSES,
+  DELIVERY_STATUS_TRANSITIONS,
+  type DeliveryStatus,
+} from "@/lib/schemas";
 
 export type NonTerminalStatus = "picked_up" | "in_transit" | "arrived";
 
@@ -18,6 +22,69 @@ export type NonTerminalStatus = "picked_up" | "in_transit" | "arrived";
 // two is exactly how a real transaction-ordering crash here once surfaced
 // as an indistinguishable "you can't do that" 409.
 export type LifecycleResult = { ok: true } | { ok: false; status: 400 | 403 | 404 | 409; error: string };
+
+/**
+ * Client-initiated cancellation, the first thing that can actually reach
+ * "cancelled" — until now the status existed in the schema with no endpoint
+ * able to write it, so a customer who booked by mistake had no way out and
+ * the delivery sat pending forever.
+ *
+ * Restricted to CANCELLABLE_DELIVERY_STATUSES: only before a rider has
+ * committed. Cancelling after acceptance is a compensation question, not a
+ * technical one.
+ *
+ * Clears the offer fields as well as setting the status. A rider holding a
+ * live offer queries on `offeredTo`, so leaving it in place would keep a
+ * cancelled delivery on their screen until the offer lapsed — and let them
+ * accept it.
+ *
+ * No payment concerns: a delivery can't be paid before "assigned"
+ * (PAYABLE_DELIVERY_STATUSES), and this can't run at or after it, so the
+ * two windows cannot overlap. If cancellation is ever widened past a rider
+ * accepting, refunds have to be solved first.
+ */
+export async function cancelDelivery(deliveryId: string, callerUid: string): Promise<LifecycleResult> {
+  const db = getAdminDb();
+  const deliveryRef = db.collection("deliveries").doc(deliveryId);
+
+  return db.runTransaction(async (tx): Promise<LifecycleResult> => {
+    const snap = await tx.get(deliveryRef);
+    if (!snap.exists) return { ok: false, status: 404, error: "Delivery not found." };
+    const delivery = snap.data()!;
+
+    // The client who booked it, not the assigned rider — a rider giving up
+    // work is a release (advanceDeliveryStatus → "pending"), which returns
+    // it to the pool rather than killing the customer's order.
+    if (delivery.clientId !== callerUid) {
+      return { ok: false, status: 403, error: "Only the client who booked this delivery can cancel it." };
+    }
+
+    const status = delivery.status as DeliveryStatus;
+    if (status === "cancelled") return { ok: true }; // idempotent: double-tap is not an error
+    if (!CANCELLABLE_DELIVERY_STATUSES.includes(status)) {
+      return {
+        ok: false,
+        status: 409,
+        error:
+          status === "delivered"
+            ? "This delivery has already been completed."
+            : "A rider has already accepted this delivery — contact support to cancel.",
+      };
+    }
+
+    tx.update(deliveryRef, {
+      status: "cancelled",
+      cancelledAt: Date.now(),
+      cancelledBy: callerUid,
+      offeredTo: [],
+      offeredAt: null,
+      offerExpiresAt: null,
+      updatedAt: Date.now(),
+    });
+
+    return { ok: true };
+  });
+}
 
 /**
  * picked_up → in_transit → arrived, or a pre-pickup release back to

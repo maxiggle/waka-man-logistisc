@@ -76,6 +76,19 @@ export const PAYABLE_DELIVERY_STATUSES: z.infer<typeof deliveryStatusSchema>[] =
   "arrived",
 ];
 
+/**
+ * Statuses a client may cancel their own delivery from — only those where
+ * no rider has committed. Once a rider has accepted they've started riding
+ * to the pickup, and cancelling out from under them is a compensation
+ * question the owner hasn't answered yet (the same open question as a rider
+ * stuck at "arrived" with a client who won't pay). Deliberately narrow
+ * rather than guessing at that policy.
+ *
+ * Shared so the cancel button's visibility and the server's authorization
+ * check are the same list — same reasoning as DELIVERY_STATUS_TRANSITIONS.
+ */
+export const CANCELLABLE_DELIVERY_STATUSES: z.infer<typeof deliveryStatusSchema>[] = ["pending", "offered"];
+
 export interface DeliveryRiderInfo {
   name: string;
   initials: string;

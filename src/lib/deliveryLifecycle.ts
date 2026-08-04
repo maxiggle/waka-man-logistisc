@@ -43,3 +43,12 @@ export async function completeDelivery(deliveryId: string, code: string): Promis
   if (result.ok) clearPosition(deliveryId);
   return result;
 }
+
+/**
+ * Cancels a delivery the signed-in client booked. Only legal before a rider
+ * accepts (CANCELLABLE_DELIVERY_STATUSES) — the server enforces that, and
+ * returns a message worth showing the customer when it refuses.
+ */
+export async function cancelDelivery(deliveryId: string): Promise<LifecycleCallResult> {
+  return authorizedPost(`/api/deliveries/${deliveryId}/cancel`);
+}

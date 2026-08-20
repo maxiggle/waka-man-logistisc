@@ -1,0 +1,38 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>CLIENT_ID</key>
+	<string>566159790904-8evh6q3mpm3mrv03ir7vlq8pljfibkhh.apps.googleusercontent.com</string>
+	<key>REVERSED_CLIENT_ID</key>
+	<string>com.googleusercontent.apps.566159790904-8evh6q3mpm3mrv03ir7vlq8pljfibkhh</string>
+	<key>ANDROID_CLIENT_ID</key>
+	<string>566159790904-gn8qiddo745ej1m33rvsnma3qjl5n9r3.apps.googleusercontent.com</string>
+	<key>API_KEY</key>
+	<string>AIzaSyDOg2kAlBn4OBoU1-Zr7Rz69f7JfH77wv8</string>
+	<key>GCM_SENDER_ID</key>
+	<string>566159790904</string>
+	<key>PLIST_VERSION</key>
+	<string>1</string>
+	<key>BUNDLE_ID</key>
+	<string>com.wakaman.rider</string>
+	<key>PROJECT_ID</key>
+	<string>wakaman-730cc</string>
+	<key>STORAGE_BUCKET</key>
+	<string>wakaman-730cc.firebasestorage.app</string>
+	<key>IS_ADS_ENABLED</key>
+	<false></false>
+	<key>IS_ANALYTICS_ENABLED</key>
+	<false></false>
+	<key>IS_APPINVITE_ENABLED</key>
+	<true></true>
+	<key>IS_GCM_ENABLED</key>
+	<true></true>
+	<key>IS_SIGNIN_ENABLED</key>
+	<true></true>
+	<key>GOOGLE_APP_ID</key>
+	<string>1:566159790904:ios:6713cd27e999e0516327cd</string>
+	<key>DATABASE_URL</key>
+	<string>https://wakaman-730cc-default-rtdb.firebaseio.com</string>
+</dict>
+</plist>

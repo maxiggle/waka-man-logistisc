@@ -11,7 +11,8 @@
     "start": "next start",
     "lint": "eslint",
     "seed": "tsx scripts/seed.ts",
-    "deploy:rules": "tsx scripts/deploy-rules.ts"
+    "deploy:rules": "tsx scripts/deploy-rules.ts",
+    "upload:apk": "tsx scripts/upload-apk.ts"
   },
   "dependencies": {
     "@capacitor-firebase/authentication": "^8.3.0",

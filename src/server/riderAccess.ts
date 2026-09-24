@@ -305,21 +305,27 @@ export async function redeemToken(token: string): Promise<RiderAccessResult> {
     const { APK_TOKEN_MAX_USES, APK_SIGNED_URL_TTL_MS } = await import("@/lib/dispatchConfig");
     
     const db = getAdminDb();
-    const storage = getAdminStorage();
     const hashedToken = crypto.createHash("sha256").update(token).digest("hex");
     const tokenRef = db.collection("apkDownloadTokens").doc(hashedToken);
 
-    const path = process.env.APK_STORAGE_PATH;
-    if (!path) {
-      console.error("APK_STORAGE_PATH not configured.");
-      return { ok: false, status: 500, error: "Download is currently unavailable. Please try again later." };
-    }
+    const directDownloadUrl = process.env.APK_DOWNLOAD_URL;
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    let file: any = null;
 
-    const file = storage.bucket().file(path);
-    const [exists] = await file.exists();
-    if (!exists) {
-      console.error("APK file not found in bucket:", path);
-      return { ok: false, status: 404, error: "The app file is currently unavailable. Please contact support." };
+    if (!directDownloadUrl) {
+      const path = process.env.APK_STORAGE_PATH;
+      if (!path) {
+        console.error("Neither APK_DOWNLOAD_URL nor APK_STORAGE_PATH is configured.");
+        return { ok: false, status: 500, error: "Download is currently unavailable. Please try again later." };
+      }
+
+      const storage = getAdminStorage();
+      file = storage.bucket().file(path);
+      const [exists] = await file.exists();
+      if (!exists) {
+        console.error("APK file not found in bucket:", path);
+        return { ok: false, status: 404, error: "The app file is currently unavailable. Please contact support." };
+      }
     }
 
     let isApproved = false;
@@ -360,6 +366,10 @@ export async function redeemToken(token: string): Promise<RiderAccessResult> {
 
     if (!isApproved) {
       return { ok: false, status: 409, error: "This link has expired. Ask the Waka Man team for a new one." };
+    }
+
+    if (directDownloadUrl) {
+      return { ok: true, downloadUrl: directDownloadUrl };
     }
 
     const [url] = await file.getSignedUrl({

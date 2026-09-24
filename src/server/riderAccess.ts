@@ -202,45 +202,69 @@ export async function reject(adminUid: string, riderUid: string): Promise<RiderA
       return { ok: false, status: 409, error: "Already rejected" };
     }
 
+    // 1 & 2. Mark the request rejected and drop availability first, in their
+    // own batch, ahead of touching any offered deliveries below. Flipping
+    // riderAccessRequests to "rejected" first means acceptDelivery's
+    // in-transaction approval check (src/server/deliveryOffers.ts) starts
+    // failing as early as possible, shrinking the window in which the rider
+    // could still accept an offer out from under this revoke.
+    const batch = db.batch();
+    batch.update(requestRef, {
+      status: "rejected",
+      reviewedBy: adminUid,
+      reviewedAt: new Date().toISOString(),
+    });
+    batch.delete(db.collection("riderAvailability").doc(riderUid));
+    await batch.commit();
+
+    // 3. Remove the rider from offeredTo on currently offered deliveries,
+    // reverting to pending if no other recipient is left. The query below is
+    // a snapshot — by the time we get here the rider may have already
+    // accepted one of these deliveries (racing this revoke) — so each
+    // delivery gets its own transaction that re-reads and re-checks
+    // status/offeredTo immediately before writing, rather than one shared
+    // batch built from stale data. That way an accept that raced ahead of us
+    // is left alone instead of being clobbered back to "pending" while
+    // riderId/rider are still set. Mirrors sweepExpiredOffers
+    // (src/server/dispatch.ts) and rejectDelivery (src/server/deliveryOffers.ts).
+    // Failures are logged per-delivery, not thrown, so one bad delivery
+    // doesn't stop the revoke from having taken effect.
     const offeredDeliveries = await db
       .collection("deliveries")
       .where("status", "==", "offered")
       .where("offeredTo", "array-contains", riderUid)
       .get();
 
-    const batch = db.batch();
+    await Promise.all(
+      offeredDeliveries.docs.map(async (dSnap) => {
+        const ref = dSnap.ref;
+        try {
+          await db.runTransaction(async (tx) => {
+            const fresh = await tx.get(ref);
+            if (!fresh.exists) return;
+            const data = fresh.data()!;
+            if (data.status !== "offered") return;
+            const offeredTo: string[] = Array.isArray(data.offeredTo) ? data.offeredTo : [];
+            if (!offeredTo.includes(riderUid)) return;
 
-    // 1. Mark request rejected
-    batch.update(requestRef, {
-      status: "rejected",
-      reviewedBy: adminUid,
-      reviewedAt: new Date().toISOString(),
-    });
+            const remaining = offeredTo.filter((id) => id !== riderUid);
+            if (remaining.length === 0) {
+              tx.update(ref, {
+                status: "pending",
+                offeredTo: [],
+                offeredAt: null,
+                offerExpiresAt: null,
+              });
+            } else {
+              tx.update(ref, { offeredTo: remaining });
+            }
+          });
+        } catch (err) {
+          console.error(`Failed to revoke offer on delivery ${ref.id} for rider ${riderUid}:`, err);
+        }
+      }),
+    );
 
-    // 2. Delete availability so the rider immediately drops out of matching
-    batch.delete(db.collection("riderAvailability").doc(riderUid));
-
-    // 3. Remove rider from offeredTo on currently offered deliveries; revert to pending if no other recipient
-    for (const dSnap of offeredDeliveries.docs) {
-      const data = dSnap.data();
-      const updatedOfferedTo = (Array.isArray(data.offeredTo) ? data.offeredTo : []).filter(
-        (id: string) => id !== riderUid
-      );
-      if (updatedOfferedTo.length === 0) {
-        batch.update(dSnap.ref, {
-          status: "pending",
-          offeredTo: [],
-          offeredAt: null,
-          offerExpiresAt: null,
-        });
-      } else {
-        batch.update(dSnap.ref, {
-          offeredTo: updatedOfferedTo,
-        });
-      }
-    }
-
-    await batch.commit();
     return { ok: true };
   } catch (err) {
     console.error("Reject/revoke error:", err);

@@ -21,7 +21,7 @@ import { requestAppAccess } from "@/lib/riderAccess";
 const IDLE_TRACKING_LABEL = "idle-availability";
 
 type Mode = "checking" | "offline" | "searching" | "assigned";
-type AccessStatus = "checking" | "approved" | "pending" | "rejected" | "none";
+type AccessStatus = "checking" | "approved" | "pending" | "rejected" | "none" | "error";
 
 type DeliveryOffer = {
   id: string;
@@ -38,7 +38,11 @@ function RiderActive() {
   const { user, userProfile, loading: authLoading } = useAuth();
 
   const [mode, setMode] = useState<Mode>(() => (isFirebaseConfigured ? "checking" : "offline"));
-  const [accessStatus, setAccessStatus] = useState<AccessStatus>("checking");
+  // Mirrors the `mode` initializer above: without Firebase configured, the
+  // access-status listener below never subscribes (it bails on
+  // !isFirebaseConfigured), so staying at "checking" would hang the UI on
+  // that screen forever instead of falling through to "Request access".
+  const [accessStatus, setAccessStatus] = useState<AccessStatus>(() => (isFirebaseConfigured ? "checking" : "none"));
   const [requestingAccess, setRequestingAccess] = useState(false);
   const [requestAccessError, setRequestAccessError] = useState("");
   const [deliveryId, setDeliveryId] = useState<string | null>(null);
@@ -57,11 +61,26 @@ function RiderActive() {
   const [offerMessages, setOfferMessages] = useState<Record<string, string>>({});
   const [now, setNow] = useState(() => Date.now());
   const [restoredOnline, setRestoredOnline] = useState(false);
+  const [accessRetryCount, setAccessRetryCount] = useState(0);
 
   const trackerRef = useRef<LocationTracker | null>(null);
   const lastAvailabilityPublishAt = useRef(0);
   const swept = useRef(false);
   const restoreCheckedRef = useRef(false);
+  // Mirrors `mode` for callbacks that must read the current mode without
+  // depending on it directly — the access-status listener below runs the
+  // idle/assigned tracker off this, and depending on `mode` there would tear
+  // the listener down and resubscribe on every mode change.
+  const modeRef = useRef<Mode>(mode);
+  useEffect(() => {
+    modeRef.current = mode;
+  }, [mode]);
+  // Same idea for `accessStatus`, read by the assigned-delivery subscription
+  // further down, which is deliberately not keyed on accessStatus.
+  const accessStatusRef = useRef<AccessStatus>(accessStatus);
+  useEffect(() => {
+    accessStatusRef.current = accessStatus;
+  }, [accessStatus]);
   // Holds the rider's display name for the idle-tracking effect below without
   // making that effect depend on userProfile — depending on it directly would
   // restart the GPS tracker (and its permission prompt) on every profile
@@ -90,6 +109,19 @@ function RiderActive() {
     setTrackingStatus("idle");
   }, []);
 
+  // The idle tracker and the assigned-delivery tracker share trackerRef (see
+  // "Once assigned, switch the same tracker over" below), so a revoke must
+  // not stop it while the rider is mid-delivery — that would kill live
+  // location publishing for a job that's already in progress. Only tear down
+  // idle presence when the rider isn't actively on one.
+  const stopIdlePresenceUnlessAssigned = useCallback(() => {
+    if (modeRef.current === "assigned") return;
+    void stopTracker();
+    if (user) void clearRiderAvailability(user.uid).catch(() => {});
+    setRestoredOnline(false);
+    setMode((prev) => (prev === "searching" ? "offline" : prev));
+  }, [stopTracker, user]);
+
   // Watch approval status in riderAccessRequests/{uid} in real time
   useEffect(() => {
     if (authLoading || !user || !isFirebaseConfigured || !db) return;
@@ -98,36 +130,26 @@ function RiderActive() {
       (snap) => {
         if (!snap.exists()) {
           setAccessStatus("none");
-          void stopTracker();
-          if (user) void clearRiderAvailability(user.uid).catch(() => {});
-          setRestoredOnline(false);
-          setMode((prev) => (prev === "searching" ? "offline" : prev));
-        } else {
-          const status = snap.data()?.status;
-          if (status === "approved") {
-            setAccessStatus("approved");
-          } else if (status === "rejected") {
-            setAccessStatus("rejected");
-            void stopTracker();
-            if (user) void clearRiderAvailability(user.uid).catch(() => {});
-            setRestoredOnline(false);
-            setMode((prev) => (prev === "searching" ? "offline" : prev));
-          } else {
-            setAccessStatus("pending");
-            void stopTracker();
-            if (user) void clearRiderAvailability(user.uid).catch(() => {});
-            setRestoredOnline(false);
-            setMode((prev) => (prev === "searching" ? "offline" : prev));
-          }
+          stopIdlePresenceUnlessAssigned();
+          return;
         }
+        const status = snap.data()?.status;
+        if (status === "approved") {
+          setAccessStatus("approved");
+          return;
+        }
+        setAccessStatus(status === "rejected" ? "rejected" : "pending");
+        stopIdlePresenceUnlessAssigned();
       },
       (err) => {
         console.error("Failed to read rider access status:", err);
-        setAccessStatus("none");
+        setAccessStatus("error");
       },
     );
     return () => unsub();
-  }, [authLoading, user, stopTracker]);
+    // accessRetryCount is a resubscribe trigger for the "Try again" button on
+    // the error card — it isn't read inside the effect.
+  }, [authLoading, user, stopIdlePresenceUnlessAssigned, accessRetryCount]);
 
   // Detect an active assignment (claimed by matching, or by an admin) in
   // real time — this is what moves a rider from "searching" to "assigned"
@@ -152,7 +174,24 @@ function RiderActive() {
           setDeliveryId((prev) => (prev ? null : prev));
           setDeliveryStatus(null);
           setPaymentStatus(undefined);
-          setMode((prev) => (prev === "assigned" ? "searching" : prev === "checking" ? "offline" : prev));
+          // A finished or released delivery returns the rider to searching, not offline —
+          // going online is an explicit choice that stays in force until they toggle it
+          // off. The server already keeps their availability "online" through completion
+          // (src/server/deliveryLifecycle.ts); dropping to "offline" here silently undid
+          // that and left them stale within AVAILABILITY_TTL_MS.
+          // "checking" -> "offline" is unchanged: that is first load with no active
+          // delivery, where the rider has not gone online yet.
+          // Exception: a revoked rider (accessStatus !== "approved") goes to "offline"
+          // instead — they can't go online again, so there's no idle loop worth restarting.
+          setMode((prev) =>
+            prev === "assigned"
+              ? accessStatusRef.current === "approved"
+                ? "searching"
+                : "offline"
+              : prev === "checking"
+                ? "offline"
+                : prev,
+          );
         }
       },
       (err) => console.error("Failed to watch for assigned deliveries:", err),
@@ -257,6 +296,8 @@ function RiderActive() {
         setMode("offline");
         setAccessStatus("rejected");
       }
+      // Losing a race is the expected outcome for most recipients of a
+      // broadcast offer — this must read as ordinary, not as a fault.
       setOfferMessages((m) => ({ ...m, [offerId]: result.error }));
       return;
     }
@@ -458,15 +499,27 @@ function RiderActive() {
   // back up on its own when mode returns to "searching". The tracker itself
   // is deliberately left running: tearing it down here would recreate the
   // exact staleness window this behaviour exists to close.
+  // Exception: a revoked rider finishing mid-delivery lands on "offline"
+  // instead (see the assigned-delivery subscription above), not "searching"
+  // — there's no idle loop to hand off to, so the tracker must actually stop
+  // here rather than being left running, and idle presence (which the
+  // revoke listener skipped stopping while still "assigned") is cleared now.
   const prevMode = useRef<Mode>(mode);
   useEffect(() => {
     if (prevMode.current === "assigned" && mode !== "assigned") {
       if (deliveryId) clearPosition(deliveryId);
       setMockWarning(false);
       swept.current = false;
+      if (mode === "offline") {
+        (async () => {
+          await stopTracker();
+          if (user) await clearRiderAvailability(user.uid).catch(() => {});
+          setRestoredOnline(false);
+        })();
+      }
     }
     prevMode.current = mode;
-  }, [mode, deliveryId]);
+  }, [mode, deliveryId, stopTracker, user]);
 
   // Presence is durable — navigating away, or the app closing outright, must
   // not end it. Only the explicit toggle (goOffline) or the server-side
@@ -543,6 +596,25 @@ function RiderActive() {
               <p className="text-sm text-ink/70">
                 Your rider account isn&apos;t approved.
               </p>
+            </div>
+          ) : accessStatus === "error" ? (
+            <div className="rounded-2xl bg-white border border-ink/10 p-8 shadow-sm text-center">
+              <div className="mx-auto flex h-16 w-16 items-center justify-center rounded-full bg-red-50 mb-4">
+                <svg className="h-8 w-8 text-red-500" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z" />
+                </svg>
+              </div>
+              <h1 className="text-xl font-bold text-primary mb-2">Couldn&apos;t Check Approval Status</h1>
+              <p className="text-sm text-ink/70 mb-6">
+                We couldn&apos;t reach the server to check your approval status. Check your connection and try again.
+              </p>
+              <button
+                type="button"
+                onClick={() => setAccessRetryCount((n) => n + 1)}
+                className="w-full rounded-full bg-primary text-white font-semibold px-6 py-3 hover:bg-primary-soft transition-colors cursor-pointer"
+              >
+                Try again
+              </button>
             </div>
           ) : (
             <div className="rounded-2xl bg-white border border-ink/10 p-8 shadow-sm text-center">

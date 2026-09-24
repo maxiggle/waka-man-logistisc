@@ -286,6 +286,16 @@ export default function AdminRidersPage() {
                       </div>
                     )
                   )}
+                  {req.status === "rejected" && (
+                    <button
+                      type="button"
+                      onClick={() => handleApprove(req.uid)}
+                      disabled={!!processingState[req.uid]}
+                      className="text-xs font-semibold text-accent hover:text-accent-tint transition-colors cursor-pointer disabled:opacity-50"
+                    >
+                      {processingState[req.uid] === "Approve" ? "Approving..." : "Approve"}
+                    </button>
+                  )}
                 </li>
               ))}
             </ul>

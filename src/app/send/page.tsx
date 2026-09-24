@@ -135,6 +135,7 @@ function SendForm() {
     dropoffResolved.address === dropoff;
 
   useEffect(() => {
+    // eslint-disable-next-line react-hooks/set-state-in-effect -- Reset quote state when dependencies change
     setQuote(null);
     setQuoteError("");
 
@@ -166,7 +167,7 @@ function SendForm() {
       cancelled = true;
       clearTimeout(timer);
     };
-  }, [user, pickup, dropoff, pickupResolved, dropoffResolved, vehicle]);
+  }, [user, pickup, dropoff, pickupResolved, dropoffResolved, vehicle, addressesReady]);
 
   const submit = async (e: React.FormEvent) => {
     e.preventDefault();

@@ -28,6 +28,7 @@ export default function TrackDeliveryPage({
     }
 
     if (!isFirebaseConfigured || !db) {
+      // eslint-disable-next-line react-hooks/set-state-in-effect -- Reset delivery state if firebase is not configured
       setDelivery(null);
       return;
     }

@@ -415,6 +415,7 @@ export default function Home() {
   const [returning, setReturning] = useState<boolean | null>(null);
 
   useEffect(() => {
+    // eslint-disable-next-line react-hooks/set-state-in-effect -- Capacitor.isNativePlatform() is synchronous and client-only
     setIsNative(Capacitor.isNativePlatform());
     setReturning(isReturningDevice());
   }, []);

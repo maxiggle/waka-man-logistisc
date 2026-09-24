@@ -180,6 +180,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
   useEffect(() => {
     if (!auth || !isFirebaseConfigured) {
+      // eslint-disable-next-line react-hooks/set-state-in-effect -- Stop loading if auth is unavailable
       setLoading(false);
       return;
     }
@@ -258,7 +259,6 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   const refreshUserProfile = useCallback(async (): Promise<UserProfile | null> => {
     if (!user) return null;
     return loadUserProfile(user);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [user]);
 
   return (

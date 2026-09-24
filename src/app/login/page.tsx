@@ -11,6 +11,7 @@ function LoginForm() {
   const searchParams = useSearchParams();
   const [isNative, setIsNative] = useState<boolean | null>(null);
   useEffect(() => {
+    // eslint-disable-next-line react-hooks/set-state-in-effect -- Capacitor.isNativePlatform() is synchronous and client-only
     setIsNative(Capacitor.isNativePlatform());
   }, []);
   // /dashboard is a client screen — on the rider app, land on the rider's own home.

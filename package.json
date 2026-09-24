@@ -7,7 +7,8 @@
     "build": "next build",
     "start": "next start",
     "lint": "eslint",
-    "seed": "tsx scripts/seed.ts"
+    "seed": "tsx scripts/seed.ts",
+    "deploy:rules": "tsx scripts/deploy-rules.ts"
   },
   "dependencies": {
     "@capacitor-firebase/authentication": "^8.3.0",

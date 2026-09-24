@@ -30,6 +30,7 @@ export default function AdminRidersPage() {
   const [isAdmin, setIsAdmin] = useState(false);
   const [processingState, setProcessingState] = useState<{ [uid: string]: string }>({});
   const [rowMessage, setRowMessage] = useState<{ [uid: string]: { type: "error" | "success", text: string } }>({});
+  const [revokingUid, setRevokingUid] = useState<string | null>(null);
 
   useEffect(() => {
     if (authLoading) return;
@@ -238,13 +239,52 @@ export default function AdminRidersPage() {
                     )}
                   </div>
                   {req.status === "approved" && (
-                    <button
-                      onClick={() => handleResend(req.uid)}
-                      disabled={!!processingState[req.uid]}
-                      className="text-xs font-semibold text-accent hover:text-accent-tint transition-colors cursor-pointer disabled:opacity-50"
-                    >
-                      {processingState[req.uid] === "Resend" ? "Resending..." : "Resend Link"}
-                    </button>
+                    revokingUid === req.uid ? (
+                      <div className="flex flex-col items-end gap-1.5 text-right">
+                        <p className="text-xs text-amber-300 max-w-xs">
+                          They&apos;ll go offline immediately. Any delivery in progress can still be completed.
+                        </p>
+                        <div className="flex items-center gap-2">
+                          <button
+                            type="button"
+                            onClick={() => setRevokingUid(null)}
+                            className="text-xs text-white/50 hover:text-white px-2 py-1 transition-colors cursor-pointer"
+                          >
+                            Cancel
+                          </button>
+                          <button
+                            type="button"
+                            onClick={async () => {
+                              setRevokingUid(null);
+                              await handleReject(req.uid);
+                            }}
+                            disabled={!!processingState[req.uid]}
+                            className="text-xs font-semibold rounded bg-red-500/20 text-red-300 border border-red-500/30 px-2.5 py-1 hover:bg-red-500/30 transition-colors cursor-pointer disabled:opacity-50"
+                          >
+                            {processingState[req.uid] === "Reject" ? "Revoking..." : "Confirm Revoke"}
+                          </button>
+                        </div>
+                      </div>
+                    ) : (
+                      <div className="flex items-center gap-3">
+                        <button
+                          type="button"
+                          onClick={() => handleResend(req.uid)}
+                          disabled={!!processingState[req.uid]}
+                          className="text-xs font-semibold text-accent hover:text-accent-tint transition-colors cursor-pointer disabled:opacity-50"
+                        >
+                          {processingState[req.uid] === "Resend" ? "Resending..." : "Resend Link"}
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => setRevokingUid(req.uid)}
+                          disabled={!!processingState[req.uid]}
+                          className="text-xs font-semibold text-red-400 hover:text-red-300 transition-colors cursor-pointer disabled:opacity-50"
+                        >
+                          {processingState[req.uid] === "Reject" ? "Revoking..." : "Revoke access"}
+                        </button>
+                      </div>
+                    )
                   )}
                 </li>
               ))}

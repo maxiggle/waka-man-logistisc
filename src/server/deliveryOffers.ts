@@ -32,10 +32,20 @@ export async function acceptDelivery(deliveryId: string, callerUid: string): Pro
   const deliveryRef = db.collection("deliveries").doc(deliveryId);
   const availabilityRef = db.collection("riderAvailability").doc(callerUid);
   const userRef = db.collection("users").doc(callerUid);
+  const requestRef = db.collection("riderAccessRequests").doc(callerUid);
 
   try {
     return await db.runTransaction(async (tx): Promise<OfferActionResult> => {
-      const [deliverySnap, availabilitySnap, userSnap] = await tx.getAll(deliveryRef, availabilityRef, userRef);
+      const [deliverySnap, availabilitySnap, userSnap, requestSnap] = await tx.getAll(
+        deliveryRef,
+        availabilityRef,
+        userRef,
+        requestRef,
+      );
+
+      if (!requestSnap.exists || requestSnap.data()?.status !== "approved") {
+        return { ok: false, status: 403, error: "Your rider account is not approved." };
+      }
 
       if (!deliverySnap.exists) return { ok: false, status: 404, error: "Delivery not found." };
       const delivery = deliverySnap.data()!;

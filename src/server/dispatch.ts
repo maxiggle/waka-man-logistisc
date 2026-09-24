@@ -140,7 +140,12 @@ async function findEligibleRiders(pickup: Geopoint, serviceLevel: ServiceLevel):
     .sort((a, b) => a.distanceKm - b.distanceKm)
     .slice(0, MAX_VEHICLE_LOOKUP_BATCH);
 
-  const userSnaps = await db.getAll(...nearest.map((c) => db.collection("users").doc(c.id)));
+  const userRefs = nearest.map((c) => db.collection("users").doc(c.id));
+  const requestRefs = nearest.map((c) => db.collection("riderAccessRequests").doc(c.id));
+  const snaps = await db.getAll(...userRefs, ...requestRefs);
+  const userSnaps = snaps.slice(0, nearest.length);
+  const requestSnaps = snaps.slice(nearest.length);
+
   const vehicleByUid = new Map<string, string | undefined>();
   userSnaps.forEach((snap, i) => {
     // Missing user document (deleted account, bad data) is treated as
@@ -149,11 +154,18 @@ async function findEligibleRiders(pickup: Geopoint, serviceLevel: ServiceLevel):
     vehicleByUid.set(nearest[i].id, typeof data?.vehicle === "string" ? data.vehicle : undefined);
   });
 
+  const approvedUids = new Set<string>();
+  requestSnaps.forEach((snap, i) => {
+    if (snap.exists && snap.data()?.status === "approved") {
+      approvedUids.add(nearest[i].id);
+    }
+  });
+
   // `nearest` is already distance-sorted (that's the whole point of the
   // slice above) and filter/map preserve order, so the result needs no
   // further sort.
   return nearest
-    .filter((c) => isEligible(vehicleByUid.get(c.id), serviceLevel))
+    .filter((c) => approvedUids.has(c.id) && isEligible(vehicleByUid.get(c.id), serviceLevel))
     .map((c) => ({ ...c, vehicle: vehicleByUid.get(c.id) }));
 }
 

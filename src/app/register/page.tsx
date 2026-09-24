@@ -79,8 +79,8 @@ function RegisterForm() {
         const currentUser = await waitForCurrentUser(auth);
         await setDoc(doc(db, "users", currentUser.uid), { vehicle }, { merge: true });
         
+        await requestAppAccess();
         if (!isNative) {
-          await requestAppAccess();
           setRequestSent(true);
           registeringRef.current = false;
           return; // Don't redirect, show confirmation

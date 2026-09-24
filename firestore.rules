@@ -242,9 +242,10 @@ service cloud.firestore {
     // may read any rider's presence, and no rider may read another's.
     match /riderAvailability/{uid} {
       allow read: if isSignedIn() && request.auth.uid == uid;
-      allow write: if isSignedIn() && request.auth.uid == uid &&
+      allow create, update: if isSignedIn() && request.auth.uid == uid &&
         request.resource.data.riderId == uid &&
-        request.resource.data.status in ['online', 'busy'];
+        request.resource.data.status in ['online', 'busy'] &&
+        get(/databases/$(database)/documents/riderAccessRequests/$(uid)).data.status == 'approved';
       allow delete: if isSignedIn() && request.auth.uid == uid;
     }
 

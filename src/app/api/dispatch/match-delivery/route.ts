@@ -4,6 +4,7 @@ export const runtime = "nodejs";
 import { NextResponse, type NextRequest } from "next/server";
 import { getUidFromRequest, getAdminDb } from "@/server/firebaseAdmin";
 import { matchNearestDelivery } from "@/server/dispatch";
+import { isApprovedRider } from "@/server/riderAccess";
 import {
   AVAILABILITY_MATCH_FRESHNESS_MS,
   MATCH_DELIVERY_RATE_LIMIT,
@@ -48,6 +49,11 @@ export async function POST(request: NextRequest) {
     const userData = userSnap.data();
     if (!userSnap.exists || userData?.role !== "rider") {
       return NextResponse.json({ error: "Forbidden" }, { status: 403 });
+    }
+
+    const approved = await isApprovedRider(uid);
+    if (!approved) {
+      return NextResponse.json({ error: "Your rider account is awaiting approval." }, { status: 403 });
     }
 
     // Never accept coordinates from the request body — read the rider's own

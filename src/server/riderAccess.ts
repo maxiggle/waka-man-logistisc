@@ -173,6 +173,18 @@ export async function approve(adminUid: string, riderUid: string): Promise<Rider
   }
 }
 
+export async function isApprovedRider(uid: string): Promise<boolean> {
+  if (!uid) return false;
+  try {
+    const db = getAdminDb();
+    const docSnap = await db.collection("riderAccessRequests").doc(uid).get();
+    return docSnap.exists && docSnap.data()?.status === "approved";
+  } catch (err) {
+    console.error(`Error checking rider approval for ${uid}:`, err);
+    return false;
+  }
+}
+
 export async function reject(adminUid: string, riderUid: string): Promise<RiderAccessResult> {
   if (!(await isAdminOrSuperAdmin(adminUid))) {
     return { ok: false, status: 403, error: "Forbidden" };
@@ -182,25 +194,56 @@ export async function reject(adminUid: string, riderUid: string): Promise<RiderA
   const requestRef = db.collection("riderAccessRequests").doc(riderUid);
 
   try {
-    await db.runTransaction(async (t) => {
-      const docSnap = await t.get(requestRef);
-      if (!docSnap.exists) {
-        throw new Error("404:Request not found");
-      }
-      if (docSnap.data()?.status === "rejected") {
-        throw new Error("409:Already rejected");
-      }
-      t.update(requestRef, {
-        status: "rejected",
-        reviewedBy: adminUid,
-        reviewedAt: new Date().toISOString(),
-      });
+    const docSnap = await requestRef.get();
+    if (!docSnap.exists) {
+      return { ok: false, status: 404, error: "Request not found" };
+    }
+    if (docSnap.data()?.status === "rejected") {
+      return { ok: false, status: 409, error: "Already rejected" };
+    }
+
+    const offeredDeliveries = await db
+      .collection("deliveries")
+      .where("status", "==", "offered")
+      .where("offeredTo", "array-contains", riderUid)
+      .get();
+
+    const batch = db.batch();
+
+    // 1. Mark request rejected
+    batch.update(requestRef, {
+      status: "rejected",
+      reviewedBy: adminUid,
+      reviewedAt: new Date().toISOString(),
     });
+
+    // 2. Delete availability so the rider immediately drops out of matching
+    batch.delete(db.collection("riderAvailability").doc(riderUid));
+
+    // 3. Remove rider from offeredTo on currently offered deliveries; revert to pending if no other recipient
+    for (const dSnap of offeredDeliveries.docs) {
+      const data = dSnap.data();
+      const updatedOfferedTo = (Array.isArray(data.offeredTo) ? data.offeredTo : []).filter(
+        (id: string) => id !== riderUid
+      );
+      if (updatedOfferedTo.length === 0) {
+        batch.update(dSnap.ref, {
+          status: "pending",
+          offeredTo: [],
+          offeredAt: null,
+          offerExpiresAt: null,
+        });
+      } else {
+        batch.update(dSnap.ref, {
+          offeredTo: updatedOfferedTo,
+        });
+      }
+    }
+
+    await batch.commit();
     return { ok: true };
   } catch (err) {
-    const msg = err instanceof Error ? err.message : String(err);
-    if (msg.includes("404:")) return { ok: false, status: 404, error: "Request not found" };
-    if (msg.includes("409:")) return { ok: false, status: 409, error: "Already rejected" };
+    console.error("Reject/revoke error:", err);
     return { ok: false, status: 500, error: "Failed to reject" };
   }
 }

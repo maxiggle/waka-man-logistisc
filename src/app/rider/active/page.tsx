@@ -15,11 +15,13 @@ import { advanceDeliveryStatus, completeDelivery, type NonTerminalStatus } from 
 import { acceptDeliveryOffer, rejectDeliveryOffer } from "@/lib/deliveryOffers";
 import type { DeliveryItem, DeliveryStatus } from "@/lib/schemas";
 import { formatQuote } from "@/lib/money";
+import { requestAppAccess } from "@/lib/riderAccess";
 
 /** Label passed to the native tracker while browsing for jobs (no delivery yet). */
 const IDLE_TRACKING_LABEL = "idle-availability";
 
 type Mode = "checking" | "offline" | "searching" | "assigned";
+type AccessStatus = "checking" | "approved" | "pending" | "rejected" | "none";
 
 type DeliveryOffer = {
   id: string;
@@ -36,6 +38,9 @@ function RiderActive() {
   const { user, userProfile, loading: authLoading } = useAuth();
 
   const [mode, setMode] = useState<Mode>(() => (isFirebaseConfigured ? "checking" : "offline"));
+  const [accessStatus, setAccessStatus] = useState<AccessStatus>("checking");
+  const [requestingAccess, setRequestingAccess] = useState(false);
+  const [requestAccessError, setRequestAccessError] = useState("");
   const [deliveryId, setDeliveryId] = useState<string | null>(null);
   const [deliveryStatus, setDeliveryStatus] = useState<DeliveryStatus | null>(null);
   const [paymentStatus, setPaymentStatus] = useState<DeliveryItem["paymentStatus"]>(undefined);
@@ -79,6 +84,51 @@ function RiderActive() {
     return () => clearTimeout(timer);
   }, [deliveryStatus]);
 
+  const stopTracker = useCallback(async () => {
+    await trackerRef.current?.stop();
+    trackerRef.current = null;
+    setTrackingStatus("idle");
+  }, []);
+
+  // Watch approval status in riderAccessRequests/{uid} in real time
+  useEffect(() => {
+    if (authLoading || !user || !isFirebaseConfigured || !db) return;
+    const unsub = onSnapshot(
+      doc(db, "riderAccessRequests", user.uid),
+      (snap) => {
+        if (!snap.exists()) {
+          setAccessStatus("none");
+          void stopTracker();
+          if (user) void clearRiderAvailability(user.uid).catch(() => {});
+          setRestoredOnline(false);
+          setMode((prev) => (prev === "searching" ? "offline" : prev));
+        } else {
+          const status = snap.data()?.status;
+          if (status === "approved") {
+            setAccessStatus("approved");
+          } else if (status === "rejected") {
+            setAccessStatus("rejected");
+            void stopTracker();
+            if (user) void clearRiderAvailability(user.uid).catch(() => {});
+            setRestoredOnline(false);
+            setMode((prev) => (prev === "searching" ? "offline" : prev));
+          } else {
+            setAccessStatus("pending");
+            void stopTracker();
+            if (user) void clearRiderAvailability(user.uid).catch(() => {});
+            setRestoredOnline(false);
+            setMode((prev) => (prev === "searching" ? "offline" : prev));
+          }
+        }
+      },
+      (err) => {
+        console.error("Failed to read rider access status:", err);
+        setAccessStatus("none");
+      },
+    );
+    return () => unsub();
+  }, [authLoading, user, stopTracker]);
+
   // Detect an active assignment (claimed by matching, or by an admin) in
   // real time — this is what moves a rider from "searching" to "assigned"
   // without them having to do anything.
@@ -102,13 +152,6 @@ function RiderActive() {
           setDeliveryId((prev) => (prev ? null : prev));
           setDeliveryStatus(null);
           setPaymentStatus(undefined);
-          // A finished or released delivery returns the rider to searching, not offline —
-          // going online is an explicit choice that stays in force until they toggle it
-          // off. The server already keeps their availability "online" through completion
-          // (src/server/deliveryLifecycle.ts); dropping to "offline" here silently undid
-          // that and left them stale within AVAILABILITY_TTL_MS.
-          // "checking" -> "offline" is unchanged: that is first load with no active
-          // delivery, where the rider has not gone online yet.
           setMode((prev) => (prev === "assigned" ? "searching" : prev === "checking" ? "offline" : prev));
         }
       },
@@ -136,6 +179,12 @@ function RiderActive() {
         if (!snap.exists()) return;
         const updatedAt = snap.data().updatedAt;
         if (typeof updatedAt !== "number" || Date.now() - updatedAt > AVAILABILITY_TTL_MS) return;
+
+        const reqSnap = await getDoc(doc(database, "riderAccessRequests", user.uid));
+        if (!reqSnap.exists() || reqSnap.data()?.status !== "approved") {
+          await clearRiderAvailability(user.uid).catch(() => {});
+          return;
+        }
 
         // A currently active delivery still wins — this only restores the
         // "was online" session, never overrides "assigned".
@@ -201,14 +250,19 @@ function RiderActive() {
     const result = await acceptDeliveryOffer(offerId);
     setOfferBusyId(null);
     if (!result.ok) {
-      // Losing a race is the expected outcome for most recipients of a
-      // broadcast offer — this must read as ordinary, not as a fault.
+      if (result.error.includes("not approved")) {
+        void stopTracker();
+        if (user) void clearRiderAvailability(user.uid).catch(() => {});
+        setRestoredOnline(false);
+        setMode("offline");
+        setAccessStatus("rejected");
+      }
       setOfferMessages((m) => ({ ...m, [offerId]: result.error }));
       return;
     }
     // On success the assigned-delivery subscription above picks this up on
     // its own and switches mode to "assigned" — nothing to do here.
-  }, []);
+  }, [stopTracker, user]);
 
   const handleRejectOffer = useCallback(async (offerId: string) => {
     setOfferBusyId(offerId);
@@ -219,10 +273,17 @@ function RiderActive() {
     // (this uid leaves offeredTo) — nothing to do here.
   }, []);
 
-  const stopTracker = useCallback(async () => {
-    await trackerRef.current?.stop();
-    trackerRef.current = null;
-    setTrackingStatus("idle");
+  const handleRequestAccess = useCallback(async () => {
+    setRequestingAccess(true);
+    setRequestAccessError("");
+    try {
+      await requestAppAccess();
+    } catch (err) {
+      console.error("Failed to request app access:", err);
+      setRequestAccessError(err instanceof Error ? err.message : "Failed to request access");
+    } finally {
+      setRequestingAccess(false);
+    }
   }, []);
 
   // Idle GPS loop while "searching": publishes availability so other clients'
@@ -270,6 +331,17 @@ function RiderActive() {
                   swept.current = true;
                 })
                 .catch((err) => {
+                  const msg = err instanceof Error ? err.message : String(err);
+                  if (msg.includes("awaiting approval") || msg.includes("not approved") || msg.includes("403")) {
+                    console.warn("Rider access not approved mid-session:", msg);
+                    void stopTracker();
+                    if (user) void clearRiderAvailability(user.uid).catch(() => {});
+                    setRestoredOnline(false);
+                    setMode("offline");
+                    setAccessStatus("rejected");
+                    setError("Your rider account is not approved.");
+                    return;
+                  }
                   // A failed sweep (rate-limited, transient network) must not
                   // mark `swept` — leave it false so the next position tick
                   // retries. Publishing already succeeded, so the rider IS
@@ -308,12 +380,12 @@ function RiderActive() {
   }, [mode, user, stopTracker]);
 
   const goOnline = useCallback(() => {
-    if (!user) return;
+    if (!user || accessStatus !== "approved") return;
     setError("");
     setRestoredOnline(false);
     swept.current = false;
     setMode("searching");
-  }, [user]);
+  }, [user, accessStatus]);
 
   const goOffline = useCallback(async () => {
     await stopTracker();
@@ -443,111 +515,168 @@ function RiderActive() {
       </header>
 
       <div className="mx-auto max-w-md px-6 py-12">
-        {mode === "offline" && (
-          <>
-            <p className="text-xs font-bold tracking-[0.25em] uppercase text-accent">You&apos;re offline</p>
-            <h1 className="mt-3 text-3xl font-extrabold tracking-tight text-primary">Go online to get jobs</h1>
-            <p className="mt-2 text-sm text-ink/60">
-              We&apos;ll match you to the nearest waiting delivery automatically once you&apos;re online.
-            </p>
-            {error && <p className="mt-4 text-sm text-red-600">{error}</p>}
-            <button
-              type="button"
-              onClick={goOnline}
-              disabled={trackingStatus === "starting"}
-              className="mt-8 w-full rounded-full bg-primary text-white font-semibold px-6 py-3.5 hover:bg-primary-soft transition-colors cursor-pointer disabled:opacity-60"
-            >
-              {trackingStatus === "starting" ? "Starting…" : "Go online"}
-            </button>
-            {trackingStatus === "denied" && (
-              <p className="mt-3 text-xs text-ink/50">
-                Location permission denied. Enable location for Waka Man in your device settings, then try again.
-              </p>
-            )}
-          </>
-        )}
-
-        {mode === "searching" && (
-          <>
-            <p className="text-xs font-bold tracking-[0.25em] uppercase text-accent">Online</p>
-            <h1 className="mt-3 text-3xl font-extrabold tracking-tight text-primary">Looking for a job…</h1>
-            <p className="mt-2 text-sm text-ink/60">
-              Your location is being shared so nearby delivery requests can find you.
-            </p>
-            {restoredOnline && (
-              <p className="mt-3 rounded-xl bg-primary/10 text-primary text-xs font-semibold px-3 py-2">
-                You&apos;re still online from before — we kept you visible to dispatch.
-              </p>
-            )}
-
-            {liveOffers.length > 0 && (
-              <div className="mt-6 space-y-4">
-                {liveOffers.map((offer) => {
-                  const secondsLeft = Math.max(0, Math.ceil((offer.offerExpiresAt - now) / 1000));
-                  const busy = offerBusyId === offer.id;
-                  const message = offerMessages[offer.id];
-                  return (
-                    <div key={offer.id} className="rounded-2xl bg-white border border-accent/40 p-5 space-y-3 shadow-sm">
-                      <div className="flex items-center justify-between">
-                        <span className="text-xs font-bold uppercase tracking-wider text-accent">New delivery offer</span>
-                        <span className="text-xs font-bold text-ink/50 tabular-nums">{secondsLeft}s</span>
-                      </div>
-                      <div className="text-sm text-ink/80 space-y-1">
-                        <p><span className="font-semibold">Pickup:</span> {offer.pickup}</p>
-                        <p><span className="font-semibold">Drop-off:</span> {offer.dropoff}</p>
-                      </div>
-                      <div className="flex items-center justify-between text-sm">
-                        <span className="font-semibold text-ink/50 uppercase tracking-wide text-xs">
-                          {offer.vehicle || "Standard"}
-                        </span>
-                        <span className="font-bold text-primary">{formatQuote(offer.quotedAmountKobo)}</span>
-                      </div>
-                      {message && <p className="text-xs text-ink/50">{message}</p>}
-                      <div className="flex gap-3">
-                        <button
-                          type="button"
-                          onClick={() => handleRejectOffer(offer.id)}
-                          disabled={busy}
-                          className="flex-1 rounded-full border border-ink/15 text-ink/70 font-semibold px-4 py-2.5 hover:bg-surface transition-colors cursor-pointer disabled:opacity-50"
-                        >
-                          Reject
-                        </button>
-                        <button
-                          type="button"
-                          onClick={() => handleAcceptOffer(offer.id)}
-                          disabled={busy}
-                          className="flex-1 rounded-full bg-accent text-ink font-semibold px-4 py-2.5 hover:bg-accent-soft transition-colors cursor-pointer disabled:opacity-50"
-                        >
-                          {busy ? "…" : "Accept"}
-                        </button>
-                      </div>
-                    </div>
-                  );
-                })}
-              </div>
-            )}
-
-            <div className="mt-8 rounded-2xl bg-white border border-ink/10 p-6 space-y-4">
-              <div className="flex items-center justify-between">
-                <span className="text-sm font-semibold text-ink/70">Status</span>
-                <span className="flex items-center gap-2 text-sm font-bold text-accent">
-                  <span className="h-2 w-2 rounded-full bg-accent animate-pulse" />
-                  Searching
-                </span>
-              </div>
-              {lastFix && (
-                <p className="text-xs text-ink/45 tabular-nums">
-                  {lastFix.lat.toFixed(5)}, {lastFix.lng.toFixed(5)} · ±{Math.round(lastFix.accuracy)}m
-                </p>
-              )}
+        {mode !== "assigned" && accessStatus !== "approved" ? (
+          accessStatus === "checking" ? (
+            <div className="rounded-2xl bg-white border border-ink/10 p-8 shadow-sm text-center">
+              <p className="text-sm text-ink/40 animate-pulse">Checking approval status…</p>
             </div>
-            <button
-              type="button"
-              onClick={goOffline}
-              className="mt-6 w-full rounded-full bg-ink text-white font-semibold px-6 py-3.5 hover:bg-ink/80 transition-colors cursor-pointer"
-            >
-              Go offline
-            </button>
+          ) : accessStatus === "pending" ? (
+            <div className="rounded-2xl bg-white border border-ink/10 p-8 shadow-sm text-center">
+              <div className="mx-auto flex h-16 w-16 items-center justify-center rounded-full bg-amber-50 mb-4">
+                <svg className="h-8 w-8 text-amber-500" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z" />
+                </svg>
+              </div>
+              <h1 className="text-xl font-bold text-primary mb-2">Application Under Review</h1>
+              <p className="text-sm text-ink/70">
+                Your application is under review. We&apos;ll email you when you&apos;re approved.
+              </p>
+            </div>
+          ) : accessStatus === "rejected" ? (
+            <div className="rounded-2xl bg-white border border-ink/10 p-8 shadow-sm text-center">
+              <div className="mx-auto flex h-16 w-16 items-center justify-center rounded-full bg-red-50 mb-4">
+                <svg className="h-8 w-8 text-red-500" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
+                </svg>
+              </div>
+              <h1 className="text-xl font-bold text-primary mb-2">Account Not Approved</h1>
+              <p className="text-sm text-ink/70">
+                Your rider account isn&apos;t approved.
+              </p>
+            </div>
+          ) : (
+            <div className="rounded-2xl bg-white border border-ink/10 p-8 shadow-sm text-center">
+              <div className="mx-auto flex h-16 w-16 items-center justify-center rounded-full bg-amber-50 mb-4">
+                <svg className="h-8 w-8 text-amber-500" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z" />
+                </svg>
+              </div>
+              <h1 className="text-xl font-bold text-primary mb-2">Account Not Approved</h1>
+              <p className="text-sm text-ink/70 mb-6">
+                Your rider account isn&apos;t approved.
+              </p>
+              {requestAccessError && (
+                <p className="mb-4 text-xs font-semibold text-red-600">{requestAccessError}</p>
+              )}
+              <button
+                type="button"
+                onClick={handleRequestAccess}
+                disabled={requestingAccess}
+                className="w-full rounded-full bg-primary text-white font-semibold px-6 py-3 hover:bg-primary-soft transition-colors cursor-pointer disabled:opacity-50"
+              >
+                {requestingAccess ? "Requesting access…" : "Request access"}
+              </button>
+            </div>
+          )
+        ) : (
+          <>
+            {mode === "offline" && (
+              <>
+                <p className="text-xs font-bold tracking-[0.25em] uppercase text-accent">You&apos;re offline</p>
+                <h1 className="mt-3 text-3xl font-extrabold tracking-tight text-primary">Go online to get jobs</h1>
+                <p className="mt-2 text-sm text-ink/60">
+                  We&apos;ll match you to the nearest waiting delivery automatically once you&apos;re online.
+                </p>
+                {error && <p className="mt-4 text-sm text-red-600">{error}</p>}
+                <button
+                  type="button"
+                  onClick={goOnline}
+                  disabled={trackingStatus === "starting"}
+                  className="mt-8 w-full rounded-full bg-primary text-white font-semibold px-6 py-3.5 hover:bg-primary-soft transition-colors cursor-pointer disabled:opacity-60"
+                >
+                  {trackingStatus === "starting" ? "Starting…" : "Go online"}
+                </button>
+                {trackingStatus === "denied" && (
+                  <p className="mt-3 text-xs text-ink/50">
+                    Location permission denied. Enable location for Waka Man in your device settings, then try again.
+                  </p>
+                )}
+              </>
+            )}
+
+            {mode === "searching" && (
+              <>
+                <p className="text-xs font-bold tracking-[0.25em] uppercase text-accent">Online</p>
+                <h1 className="mt-3 text-3xl font-extrabold tracking-tight text-primary">Looking for a job…</h1>
+                <p className="mt-2 text-sm text-ink/60">
+                  Your location is being shared so nearby delivery requests can find you.
+                </p>
+                {restoredOnline && (
+                  <p className="mt-3 rounded-xl bg-primary/10 text-primary text-xs font-semibold px-3 py-2">
+                    You&apos;re still online from before — we kept you visible to dispatch.
+                  </p>
+                )}
+
+                {liveOffers.length > 0 && (
+                  <div className="mt-6 space-y-4">
+                    {liveOffers.map((offer) => {
+                      const secondsLeft = Math.max(0, Math.ceil((offer.offerExpiresAt - now) / 1000));
+                      const busy = offerBusyId === offer.id;
+                      const message = offerMessages[offer.id];
+                      return (
+                        <div key={offer.id} className="rounded-2xl bg-white border border-accent/40 p-5 space-y-3 shadow-sm">
+                          <div className="flex items-center justify-between">
+                            <span className="text-xs font-bold uppercase tracking-wider text-accent">New delivery offer</span>
+                            <span className="text-xs font-bold text-ink/50 tabular-nums">{secondsLeft}s</span>
+                          </div>
+                          <div className="text-sm text-ink/80 space-y-1">
+                            <p><span className="font-semibold">Pickup:</span> {offer.pickup}</p>
+                            <p><span className="font-semibold">Drop-off:</span> {offer.dropoff}</p>
+                          </div>
+                          <div className="flex items-center justify-between text-sm">
+                            <span className="font-semibold text-ink/50 uppercase tracking-wide text-xs">
+                              {offer.vehicle || "Standard"}
+                            </span>
+                            <span className="font-bold text-primary">{formatQuote(offer.quotedAmountKobo)}</span>
+                          </div>
+                          {message && <p className="text-xs text-ink/50">{message}</p>}
+                          <div className="flex gap-3">
+                            <button
+                              type="button"
+                              onClick={() => handleRejectOffer(offer.id)}
+                              disabled={busy}
+                              className="flex-1 rounded-full border border-ink/15 text-ink/70 font-semibold px-4 py-2.5 hover:bg-surface transition-colors cursor-pointer disabled:opacity-50"
+                            >
+                              Reject
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => handleAcceptOffer(offer.id)}
+                              disabled={busy}
+                              className="flex-1 rounded-full bg-accent text-ink font-semibold px-4 py-2.5 hover:bg-accent-soft transition-colors cursor-pointer disabled:opacity-50"
+                            >
+                              {busy ? "…" : "Accept"}
+                            </button>
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </div>
+                )}
+
+                <div className="mt-8 rounded-2xl bg-white border border-ink/10 p-6 space-y-4">
+                  <div className="flex items-center justify-between">
+                    <span className="text-sm font-semibold text-ink/70">Status</span>
+                    <span className="flex items-center gap-2 text-sm font-bold text-accent">
+                      <span className="h-2 w-2 rounded-full bg-accent animate-pulse" />
+                      Searching
+                    </span>
+                  </div>
+                  {lastFix && (
+                    <p className="text-xs text-ink/45 tabular-nums">
+                      {lastFix.lat.toFixed(5)}, {lastFix.lng.toFixed(5)} · ±{Math.round(lastFix.accuracy)}m
+                    </p>
+                  )}
+                </div>
+                <button
+                  type="button"
+                  onClick={goOffline}
+                  className="mt-6 w-full rounded-full bg-ink text-white font-semibold px-6 py-3.5 hover:bg-ink/80 transition-colors cursor-pointer"
+                >
+                  Go offline
+                </button>
+              </>
+            )}
           </>
         )}
 

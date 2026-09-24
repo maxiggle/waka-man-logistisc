@@ -9,6 +9,7 @@ import { Capacitor } from "@capacitor/core";
 import { useAuth, type UserRole } from "@/context/AuthContext";
 import { auth, db } from "@/lib/firebase";
 import { AVAILABLE_TRANSPORT_MODES, type RiderVehicle } from "@/lib/dispatchConfig";
+import { requestAppAccess } from "@/lib/riderAccess";
 
 /**
  * signInWithGoogle() can resolve slightly before the SDK's currentUser is
@@ -37,6 +38,7 @@ function RegisterForm() {
   const params = useSearchParams();
   const [isNative, setIsNative] = useState<boolean | null>(null);
   useEffect(() => {
+    // eslint-disable-next-line react-hooks/set-state-in-effect -- Capacitor.isNativePlatform() is synchronous and client-only
     setIsNative(Capacitor.isNativePlatform());
   }, []);
 
@@ -50,15 +52,16 @@ function RegisterForm() {
 
   const [signingIn, setSigningIn] = useState(false);
   const [error, setError] = useState("");
+  const [requestSent, setRequestSent] = useState(false);
   // Suppresses the auto-redirect effect below while a registration write is
   // in flight (or failed) — `user` can go non-null mid-write, and the effect
   // must not navigate away before the vehicle write has succeeded.
   const registeringRef = useRef(false);
 
   useEffect(() => {
-    if (registeringRef.current) return;
+    if (registeringRef.current || requestSent) return;
     if (user) router.replace(role === "rider" ? "/rider/active" : "/send");
-  }, [user, role, router]);
+  }, [user, role, router, requestSent]);
 
   const handleGoogleSignUp = async () => {
     if (role === "rider" && !vehicle) {
@@ -75,6 +78,13 @@ function RegisterForm() {
         if (!db || !auth) throw new Error("Firebase is not configured.");
         const currentUser = await waitForCurrentUser(auth);
         await setDoc(doc(db, "users", currentUser.uid), { vehicle }, { merge: true });
+        
+        if (!isNative) {
+          await requestAppAccess();
+          setRequestSent(true);
+          registeringRef.current = false;
+          return; // Don't redirect, show confirmation
+        }
       }
 
       // Only clear the guard on success — on failure it stays suppressed so
@@ -156,6 +166,18 @@ function RegisterForm() {
             Please configure your Firebase credentials in <code className="bg-amber-100 px-1 py-0.5 rounded font-mono text-xs">.env.local</code> to enable Google Registration.
           </p>
         </div>
+      ) : requestSent ? (
+        <div className="mt-8 rounded-2xl bg-white border border-ink/10 p-8 shadow-sm text-center">
+          <div className="mx-auto flex h-16 w-16 items-center justify-center rounded-full bg-emerald-50 mb-4">
+            <svg className="h-8 w-8 text-emerald-500" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" />
+            </svg>
+          </div>
+          <h2 className="text-xl font-bold text-primary mb-2">Request Sent</h2>
+          <p className="text-sm text-ink/70">
+            We&apos;ll review your application and email you when approved. You can close this window.
+          </p>
+        </div>
       ) : (
         <div className="mt-8 rounded-2xl bg-white border border-ink/10 p-8 shadow-sm">
           <p className="text-sm text-ink/70 text-center mb-6">
@@ -192,7 +214,11 @@ function RegisterForm() {
                 d="M12 5.38c1.62 0 3.06.56 4.21 1.64l3.15-3.15C17.45 2.09 14.97 1 12 1 7.7 1 3.99 3.47 2.18 7.06l3.66 2.84c.87-2.6 3.3-4.52 6.16-4.52z"
               />
             </svg>
-            {signingIn ? "Connecting Google..." : "Register with Google"}
+            {signingIn
+              ? "Connecting Google..."
+              : role === "rider" && !isNative
+              ? "Request app access"
+              : "Register with Google"}
           </button>
         </div>
       )}

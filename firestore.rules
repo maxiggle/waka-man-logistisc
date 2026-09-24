@@ -125,6 +125,16 @@ service cloud.firestore {
       allow write: if false;
     }
 
+    match /riderAccessRequests/{uid} {
+      // A user may read only their own request. Admins may read all requests.
+      allow read: if isSignedIn() && (request.auth.uid == uid || isAdmin());
+      allow write: if false; // Only server handles writes
+    }
+
+    match /apkDownloadTokens/{tokenId} {
+      allow read, write: if false; // Only server handles these
+    }
+
     // --- deliveries/{deliveryId} ---
     //
     // Read-only to every client. Creation moved server-side (W5-T4,

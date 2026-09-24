@@ -3,7 +3,7 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
-import { collection, getDocs, query, orderBy, limit } from "firebase/firestore";
+import { collection, getDocs, query, orderBy, limit, where } from "firebase/firestore";
 import { db, isFirebaseConfigured } from "@/lib/firebase";
 import { useAuth } from "@/context/AuthContext";
 import type { DeliveryItem, DeliveryStatus } from "@/lib/schemas";
@@ -60,6 +60,7 @@ export default function AdminPage() {
   const { user, userProfile, loading: authLoading, refreshUserProfile } = useAuth();
   const [deliveries, setDeliveries] = useState<DeliveryItem[]>([]);
   const [riders, setRiders] = useState<RiderStat[]>([]);
+  const [pendingRequests, setPendingRequests] = useState<number>(0);
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
   const [search, setSearch] = useState("");
@@ -131,6 +132,10 @@ export default function AdminPage() {
           };
         });
       setRiders(riderList);
+
+      const requestsQuery = query(collection(db, "riderAccessRequests"), where("status", "==", "pending"));
+      const reqSnap = await getDocs(requestsQuery);
+      setPendingRequests(reqSnap.docs.length);
     } catch (err) {
       console.error("Admin data fetch error:", err);
     } finally {
@@ -140,7 +145,8 @@ export default function AdminPage() {
 
   useEffect(() => {
     if (authLoading || checkingAdmin || !user || !isAdmin) return;
-    fetchAdminData();
+    // eslint-disable-next-line react-hooks/set-state-in-effect -- Admin data fetching safely updates state
+    fetchAdminData().catch(console.error);
   }, [authLoading, checkingAdmin, user, isAdmin, fetchAdminData]);
 
   // WM-104: config/pricing missing/invalid means every booking 422s with no
@@ -249,6 +255,15 @@ export default function AdminPage() {
         <Icon path={ICONS.admins} className="h-4 w-4" />
         Manage admins
       </Link>
+      <Link href="/admin/riders" className="flex items-center gap-3 rounded-xl px-3 py-2.5 text-sm font-semibold text-white/60 hover:text-white hover:bg-white/5 transition-colors cursor-pointer">
+        <Icon path={ICONS.riders} className="h-4 w-4" />
+        Rider requests
+        {pendingRequests > 0 && (
+          <span className="ml-auto rounded-full bg-accent px-2 py-0.5 text-[10px] font-bold text-[#141019]">
+            {pendingRequests}
+          </span>
+        )}
+      </Link>
       <Link href="/admin/areas" className="flex items-center gap-3 rounded-xl px-3 py-2.5 text-sm font-semibold text-white/60 hover:text-white hover:bg-white/5 transition-colors cursor-pointer">
         <Icon path={ICONS.pin} className="h-4 w-4" />
         Service areas
@@ -343,7 +358,8 @@ export default function AdminPage() {
           <div className="flex lg:hidden items-center gap-5 px-6 pb-3 text-xs">
             <a href="#deliveries" className="font-semibold text-white/60 hover:text-white transition-colors cursor-pointer">Deliveries</a>
             <a href="#riders" className="font-semibold text-white/60 hover:text-white transition-colors cursor-pointer">Riders</a>
-            <Link href="/admin/team" className="font-semibold text-white/60 hover:text-white transition-colors cursor-pointer">Manage admins</Link>
+            <Link href="/admin/riders" className="font-semibold text-white/60 hover:text-white transition-colors cursor-pointer">Requests {pendingRequests > 0 && `(${pendingRequests})`}</Link>
+            <Link href="/admin/team" className="font-semibold text-white/60 hover:text-white transition-colors cursor-pointer">Admins</Link>
             <Link href="/admin/areas" className="font-semibold text-white/60 hover:text-white transition-colors cursor-pointer">Service areas</Link>
             <Link href="/" className="font-semibold text-white/60 hover:text-white transition-colors cursor-pointer">Exit</Link>
           </div>
@@ -357,6 +373,17 @@ export default function AdminPage() {
             <span className="text-white/80 font-normal">
               Run the seed script (see WM-104), or check server logs for why config/pricing is failing.
             </span>
+          </div>
+        )}
+
+        {pendingRequests > 0 && (
+          <div className="bg-primary-light/20 text-primary-light px-6 py-3 text-sm font-semibold flex flex-wrap items-center justify-center gap-2 text-center">
+            <span>
+              {pendingRequests} pending rider access request{pendingRequests === 1 ? "" : "s"}.
+            </span>
+            <Link href="/admin/riders" className="underline hover:text-white transition-colors">
+              Review requests
+            </Link>
           </div>
         )}
 

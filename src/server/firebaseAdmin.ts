@@ -5,6 +5,7 @@
 import { cert, getApp, getApps, initializeApp, type App } from "firebase-admin/app";
 import { getAuth } from "firebase-admin/auth";
 import { getFirestore, type Firestore } from "firebase-admin/firestore";
+import { getStorage, type Storage } from "firebase-admin/storage";
 import type { NextRequest } from "next/server";
 
 // Vercel Fluid Compute reuses instances across invocations, so a warm request
@@ -21,7 +22,13 @@ function getAdminApp(): App {
   }
 
   const serviceAccount = JSON.parse(Buffer.from(encoded, "base64").toString("utf8"));
-  return initializeApp({ credential: cert(serviceAccount) });
+  
+  const storageBucket = process.env.FIREBASE_STORAGE_BUCKET || process.env.NEXT_PUBLIC_FIREBASE_STORAGE_BUCKET;
+  
+  return initializeApp({
+    credential: cert(serviceAccount),
+    ...(storageBucket ? { storageBucket } : {})
+  });
 }
 
 // Resolved lazily on every call rather than cached in a module-level
@@ -31,6 +38,10 @@ function getAdminApp(): App {
 // singleton), so there's no cost to not caching this ourselves.
 export function getAdminDb(): Firestore {
   return getFirestore(getAdminApp());
+}
+
+export function getAdminStorage(): Storage {
+  return getStorage(getAdminApp());
 }
 
 /**

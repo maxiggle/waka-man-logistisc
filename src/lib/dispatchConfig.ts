@@ -276,3 +276,13 @@ export const DETOUR_FACTOR = 1.5;
  * length.
  */
 export const MAX_TRIP_DISTANCE_KM = 30;
+
+/** How long an approved rider's APK download token is valid for (48h) */
+export const RIDER_ACCESS_TOKEN_TTL_MS = 172_800_000;
+
+/** How long a generated signed URL for the APK is valid for (5 minutes) */
+export const APK_SIGNED_URL_TTL_MS = 300_000;
+
+/** How many times a token can be used to download the APK */
+export const APK_TOKEN_MAX_USES = 3;
+
